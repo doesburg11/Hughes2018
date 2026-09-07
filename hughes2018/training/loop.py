@@ -47,14 +47,13 @@ def train(
         }
 
         for _ in range(rollout_length):
+            obs_before_step = obs  # o_t: what act() below actually conditions on
             actions = {}
-            action_book_keeping = {}
             for agent_id, agent in agents.items():
-                action, _log_prob, _value, _state_before = agent.act(obs[agent_id])
+                action, _log_prob, _value, _state_before = agent.act(obs_before_step[agent_id])
                 actions[agent_id] = action
-                action_book_keeping[agent_id] = action
 
-            obs, raw_rewards, dones, _infos = env.step(actions)
+            obs, raw_rewards, dones, _infos = env.step(actions)  # obs is now o_{t+1}
             rewards = inequity_reward.apply(raw_rewards) if inequity_reward is not None else raw_rewards
 
             episode_collective_return += sum(raw_rewards.values())
@@ -62,8 +61,14 @@ def train(
 
             done = dones.get("__all__", False)
             for agent_id in agents:
-                rollouts[agent_id].obs.append(_none_to_prev(rollouts[agent_id].obs, obs, agent_id))
-                rollouts[agent_id].actions.append(action_book_keeping[agent_id])
+                # Store o_t (not the post-step o_{t+1}) paired with a_t: this
+                # is what update() replays through the network to recompute
+                # log_prob(a_t | o_t) with gradients. Pairing a_t with
+                # o_{t+1} instead (a real bug caught in review, since fixed)
+                # would silently train on the wrong state-action pairing and
+                # shift the whole LSTM replay sequence by one step.
+                rollouts[agent_id].obs.append(obs_before_step[agent_id])
+                rollouts[agent_id].actions.append(actions[agent_id])
                 rollouts[agent_id].rewards.append(rewards.get(agent_id, 0.0))
                 rollouts[agent_id].dones.append(bool(done))
 
@@ -102,14 +107,3 @@ def train(
             on_log(stats)
 
     return stats
-
-
-def _none_to_prev(existing_obs_list, obs_dict, agent_id):
-    """`obs` is keyed by agent id and updated every step; this just indexes
-    into it defensively in case an agent is momentarily absent from the dict
-    (not currently possible with these envs, since every agent gets an
-    observation every step including while removed/tagged-out, but guards
-    against a future env where that isn't true)."""
-    if agent_id in obs_dict:
-        return obs_dict[agent_id]
-    return existing_obs_list[-1] if existing_obs_list else None

@@ -57,22 +57,24 @@ class ActorCriticConfig:
 
 
 class ActorCriticNetwork(nn.Module):
-    def __init__(self, obs_channels: int, cfg: ActorCriticConfig):
+    def __init__(self, obs_channels: int, obs_height: int, obs_width: int, cfg: ActorCriticConfig):
         super().__init__()
         self.cfg = cfg
+        # padding=1, stride=1, kernel=3 preserves H/W, so the flattened conv
+        # output size is known analytically -- no lazy shape inference
+        # needed. (A prior lazy-init version built `fc1` with a placeholder
+        # in_features at construction time, before the optimizer's param
+        # list was captured, then silently replaced `fc1` with a
+        # correctly-shaped module on first forward; the optimizer never saw
+        # the replacement, so that layer never actually trained. Caught in
+        # review, fixed by removing the lazy pattern entirely.)
         self.conv = nn.Conv2d(obs_channels, cfg.conv_channels, kernel_size=3, stride=1, padding=1)
-        self._flat_dim = None  # set lazily on first forward, since view size depends on obs H/W
-        self.fc1 = nn.Linear(1, cfg.fc_hidden)  # in_features patched in _lazy_init
+        flat_dim = cfg.conv_channels * obs_height * obs_width
+        self.fc1 = nn.Linear(flat_dim, cfg.fc_hidden)
         self.fc2 = nn.Linear(cfg.fc_hidden, cfg.fc_hidden)
         self.lstm = nn.LSTMCell(cfg.fc_hidden, cfg.lstm_hidden)
         self.policy_head = nn.Linear(cfg.lstm_hidden, cfg.num_actions)
         self.value_head = nn.Linear(cfg.lstm_hidden, 1)
-
-    def _lazy_init(self, flat_dim: int, device: torch.device) -> None:
-        if self._flat_dim is not None:
-            return
-        self._flat_dim = flat_dim
-        self.fc1 = nn.Linear(flat_dim, self.cfg.fc_hidden).to(device)
 
     def initial_state(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         h = torch.zeros(batch_size, self.cfg.lstm_hidden, device=device)
@@ -83,7 +85,6 @@ class ActorCriticNetwork(nn.Module):
         """obs: (B, C, H, W) float32 in [0, 1]. Returns (policy_logits, value, new_lstm_state)."""
         x = F.relu(self.conv(obs))
         x = x.flatten(start_dim=1)
-        self._lazy_init(x.shape[1], obs.device)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         h, c = self.lstm(x, lstm_state)
@@ -95,12 +96,19 @@ class ActorCriticNetwork(nn.Module):
 class ActorCriticAgent:
     """One independent learner: owns its network, optimizer, and LSTM state."""
 
-    def __init__(self, obs_channels: int, config: ActorCriticConfig | None = None, device: str = "cpu"):
+    def __init__(
+        self,
+        obs_channels: int,
+        obs_height: int,
+        obs_width: int,
+        config: ActorCriticConfig | None = None,
+        device: str = "cpu",
+    ):
         self.cfg = config or ActorCriticConfig(num_actions=8)
         self.device = torch.device(device)
         if self.cfg.seed is not None:
             torch.manual_seed(self.cfg.seed)
-        self.network = ActorCriticNetwork(obs_channels, self.cfg).to(self.device)
+        self.network = ActorCriticNetwork(obs_channels, obs_height, obs_width, self.cfg).to(self.device)
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.cfg.learning_rate)
         self.lstm_state = self.network.initial_state(1, self.device)
 

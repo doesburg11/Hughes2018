@@ -1,32 +1,46 @@
-"""Inequity-averse intrinsic reward (Hughes et al. 2018, Sec. 3).
+"""Inequity-averse intrinsic reward (Hughes et al. 2018, Sec. 3, Eq. 4).
 
 A temporally-extended version of the Fehr & Schmidt (1999) inequity-aversion
 utility function: each agent compares its reward not to others' *instantaneous*
 per-step reward (which is dominated by noise from asynchronous individual
 events -- one agent happening to pick up an apple this exact step, another
-not), but to a temporally-smoothed running estimate of everyone's reward. The
-static Fehr-Schmidt model compares final payoffs; this is the natural
-extension to a setting where "payoff" is a reward stream, not a single
-number.
+not), but to a discounted *trace* of everyone's past reward. The static
+Fehr-Schmidt model compares final payoffs; this is the natural extension to
+a setting where "payoff" is a reward stream, not a single number.
 
-    smoothed_i <- lambda * smoothed_i + (1 - lambda) * r_i        (per step)
+The paper's own Eq. 4 (verified against arXiv v3, arxiv.org/pdf/1803.08884 --
+an earlier version of this file used a normalized exponential-moving-*average*
+here instead, `e <- lambda*e + (1-lambda)*r`, which is a different, differently-
+scaled quantity; caught in review against the primary text):
 
-    r_i^total = r_i - (alpha_i / (n-1)) * sum_j max(smoothed_j - smoothed_i, 0)
-                     - (beta_i  / (n-1)) * sum_j max(smoothed_i - smoothed_j, 0)
+    e_i(t) = gamma * lambda * e_i(t-1) + r_i(t)                     (per step)
 
-`alpha_i` penalizes disadvantageous inequity (envy: others are ahead);
-`beta_i` penalizes advantageous inequity (guilt: this agent is ahead). Both
-are sampled once per agent (population heterogeneity), matching the same
-per-agent-parameter design used for the reputation reward in the sibling
-SequentialSocialDilemmas repo's `cleanup_reputation` experiment.
+    r_i^total = r_i - (alpha_i / (n-1)) * sum_j max(e_j - e_i, 0)    # envy
+                     - (beta_i  / (n-1)) * sum_j max(e_i - e_j, 0)   # guilt
 
-**Documented gap**: the paper does not state an exact numeric smoothing
-window for the temporal averaging (only that raw per-step comparison is too
-noisy to use directly) -- `smoothing` below is a tunable parameter with a
-default, not a verified reproduction of a specific unstated constant. This
-mirrors how the sibling Leibo2017 repo handles its own unstated hyperparameters
-(e.g. its epsilon-decay schedule length) -- made configurable and documented,
-rather than presented as a settled number.
+This is an *unnormalized*, discount-accumulating trace (structurally an
+eligibility-trace-like quantity, using the same `gamma` as the RL return
+discount, plus a separate trace-decay `lambda`) -- not a bounded running
+average. For a roughly constant reward rate, it settles near
+`r / (1 - gamma*lambda)`, i.e. potentially several times larger in magnitude
+than the raw reward itself, not the same scale. `alpha_i`/`beta_i` penalize
+disadvantageous inequity (envy: others' trace is ahead) and advantageous
+inequity (guilt: this agent's trace is ahead) respectively, sampled once per
+agent (population heterogeneity), matching the same per-agent-parameter
+design used for the reward term in the sibling SequentialSocialDilemmas
+repo's `cleanup_reputation` experiment.
+
+**Documented gap**: `alpha`/`beta`'s numeric ranges, and `lambda`'s exact
+value, aren't reproduced here from this paper's primary text (see the
+top-level README); `gamma` should match whatever discount factor the actor-
+critic agent trains with, since the paper's trace reuses the RL discount.
+
+**Known, deliberate simplification** (also documented in the README): the
+paper additionally has each agent *observe* every other player's trace
+`e_j` as part of its policy input, so the agent can react to inequity, not
+just be reward-shaped by it. This repo's agents only receive the RGB
+observation -- the inequity term still affects training via the reward
+signal, but isn't observable to the policy itself.
 """
 
 from __future__ import annotations
@@ -39,39 +53,35 @@ class InequityAversionReward:
     agent_ids: list[str]
     alpha: dict[str, float]
     beta: dict[str, float]
-    smoothing: float = 0.95
-    smoothed_reward: dict[str, float] = field(init=False)
+    gamma: float = 0.99  # should match the actor-critic's own discount factor
+    trace_lambda: float = 0.95  # unstated by the paper as an exact number; documented, tunable default
+    trace: dict[str, float] = field(init=False)
 
     def __post_init__(self) -> None:
         missing_alpha = set(self.agent_ids) - set(self.alpha)
         missing_beta = set(self.agent_ids) - set(self.beta)
         if missing_alpha or missing_beta:
             raise ValueError(f"alpha/beta must be provided for every agent id; missing {missing_alpha | missing_beta}")
-        self.smoothed_reward = {agent_id: 0.0 for agent_id in self.agent_ids}
+        self.trace = {agent_id: 0.0 for agent_id in self.agent_ids}
 
     def reset(self) -> None:
-        self.smoothed_reward = {agent_id: 0.0 for agent_id in self.agent_ids}
+        self.trace = {agent_id: 0.0 for agent_id in self.agent_ids}
 
     def apply(self, raw_rewards: dict[str, float]) -> dict[str, float]:
-        """Update the smoothed-reward estimate and return inequity-adjusted rewards."""
+        """Update each agent's reward trace and return inequity-adjusted rewards."""
         n = len(self.agent_ids)
+        decay = self.gamma * self.trace_lambda
         for agent_id in self.agent_ids:
             r = raw_rewards.get(agent_id, 0.0)
-            self.smoothed_reward[agent_id] = (
-                self.smoothing * self.smoothed_reward[agent_id] + (1.0 - self.smoothing) * r
-            )
+            self.trace[agent_id] = decay * self.trace[agent_id] + r
 
         adjusted = dict(raw_rewards)
         if n <= 1:
             return adjusted
         for agent_id in self.agent_ids:
-            own = self.smoothed_reward[agent_id]
-            disadvantageous = sum(
-                max(self.smoothed_reward[other] - own, 0.0) for other in self.agent_ids if other != agent_id
-            )
-            advantageous = sum(
-                max(own - self.smoothed_reward[other], 0.0) for other in self.agent_ids if other != agent_id
-            )
+            own = self.trace[agent_id]
+            disadvantageous = sum(max(self.trace[other] - own, 0.0) for other in self.agent_ids if other != agent_id)
+            advantageous = sum(max(own - self.trace[other], 0.0) for other in self.agent_ids if other != agent_id)
             penalty = (self.alpha[agent_id] / (n - 1)) * disadvantageous + (
                 self.beta[agent_id] / (n - 1)
             ) * advantageous

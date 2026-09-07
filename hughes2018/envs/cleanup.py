@@ -147,7 +147,7 @@ class CleanupEnv(GridWorldEnv):
     def _spawn_apples(self, grid: np.ndarray) -> None:
         if np.isclose(self.current_apple_spawn_prob, 0.0):
             return
-        occupied = {(a.row, a.col) for a in self.agents.values() if a.removed_timer == 0}
+        occupied = {(a.row, a.col) for a in self.agents.values()}
         for (r, c) in self.apple_cells:
             if grid[r, c] == EMPTY and (r, c) not in occupied and self.rng.random() < self.current_apple_spawn_prob:
                 grid[r, c] = APPLE

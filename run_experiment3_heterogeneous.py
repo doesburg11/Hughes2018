@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Experiment 3: a heterogeneous population -- some agents inequity-averse,
 some selfish, trained together in the same group on Cleanup.
 
@@ -14,8 +15,8 @@ or benefit an agent when its co-players aren't") without the generational
 selection dynamics on top. That's a documented gap here, not a hidden one --
 see the README.
 
-`InequityAversionReward.apply()` tracks smoothed rewards across the whole
-group (needed so the comparison term is against the true group average,
+`InequityAversionReward.apply()` tracks a reward trace across the whole
+group (needed so the comparison term is against the true group's traces,
 including the selfish agents) but this script only *uses* the adjusted
 reward for the agents flagged inequity-averse; selfish agents train on their
 raw, unadjusted reward.
@@ -45,7 +46,7 @@ def main():
     parser.add_argument("--total-steps", type=int, default=20_000, help="Smoke-test scale by default.")
     parser.add_argument("--rollout-length", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--inequity-smoothing", type=float, default=0.95)
+    parser.add_argument("--inequity-trace-lambda", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--out-dir", type=str, default="output/run_experiment3_heterogeneous")
@@ -58,9 +59,12 @@ def main():
     print(f"Inequity-averse agents: {sorted(inequity_averse_ids)}")
     print(f"Selfish agents:         {sorted(set(agent_ids) - inequity_averse_ids)}")
 
+    obs_hw = 2 * env.cfg.view_radius + 1
     agents = {
         aid: ActorCriticAgent(
             obs_channels=3,
+            obs_height=obs_hw,
+            obs_width=obs_hw,
             config=ActorCriticConfig(num_actions=env.num_actions, seed=args.seed + i, learning_rate=args.lr),
             device=args.device,
         )
@@ -71,7 +75,7 @@ def main():
         agent_ids=agent_ids,
         alpha={aid: float(alpha_rng.uniform(2.4, 3.0)) for aid in agent_ids},
         beta={aid: float(alpha_rng.uniform(0.16, 0.20)) for aid in agent_ids},
-        smoothing=args.inequity_smoothing,
+        trace_lambda=args.inequity_trace_lambda,
     )
 
     subgroup_returns = {"inequity_averse": [], "selfish": []}
@@ -86,14 +90,17 @@ def main():
     while total_steps < args.total_steps:
         rollouts = {aid: Rollout(initial_lstm_state=agents[aid].lstm_state) for aid in agent_ids}
         for _ in range(args.rollout_length):
-            actions = {aid: agents[aid].act(obs[aid])[0] for aid in agent_ids}
-            obs, raw_rewards, dones, _infos = env.step(actions)
+            obs_before_step = obs  # o_t: what act() below actually conditions on
+            actions = {aid: agents[aid].act(obs_before_step[aid])[0] for aid in agent_ids}
+            obs, raw_rewards, dones, _infos = env.step(actions)  # obs is now o_{t+1}
             adjusted = inequity_reward.apply(raw_rewards)
             total_steps += 1
             for aid in agent_ids:
                 per_agent_episode_return[aid] += raw_rewards[aid]
                 used_reward = adjusted[aid] if aid in inequity_averse_ids else raw_rewards[aid]
-                rollouts[aid].obs.append(obs[aid])
+                # o_t (not the post-step o_{t+1}) paired with a_t -- see
+                # training/loop.py's identical fix for why this matters.
+                rollouts[aid].obs.append(obs_before_step[aid])
                 rollouts[aid].actions.append(actions[aid])
                 rollouts[aid].rewards.append(used_reward)
                 rollouts[aid].dones.append(bool(dones["__all__"]))

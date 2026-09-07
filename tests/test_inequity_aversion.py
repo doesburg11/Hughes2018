@@ -1,4 +1,8 @@
-"""Correctness tests for the inequity-aversion reward formula."""
+"""Correctness tests for the inequity-aversion reward formula (Eq. 4:
+e_i(t) = gamma * lambda * e_i(t-1) + r_i(t), an unnormalized discounted
+trace -- NOT a bounded running average, so these tests avoid hardcoding
+absolute-magnitude expectations that assumed the earlier (incorrect)
+EWMA-average version of this formula; see the module docstring."""
 
 import pytest
 
@@ -24,24 +28,27 @@ def test_equal_rewards_produce_no_penalty():
     assert out["b"] == pytest.approx(1.0)
 
 
-def test_matches_hand_computed_formula_after_smoothing():
+def test_matches_hand_computed_trace_formula():
+    # gamma=1.0, trace_lambda=0.9 for clean arithmetic (decay = 0.9).
     r = InequityAversionReward(
-        agent_ids=["a", "b"], alpha={"a": 2.0, "b": 2.0}, beta={"a": 0.2, "b": 0.2}, smoothing=0.9
+        agent_ids=["a", "b"], alpha={"a": 2.0, "b": 2.0}, beta={"a": 0.2, "b": 0.2}, gamma=1.0, trace_lambda=0.9
     )
-    r.apply({"a": 1.0, "b": 0.0})  # smoothed_a = 0.1, smoothed_b = 0.0
-    out = r.apply({"a": 1.0, "b": 0.0})  # smoothed_a = 0.19, smoothed_b = 0.0
-    smoothed_a = 0.9 * 0.1 + 0.1 * 1.0
-    smoothed_b = 0.9 * 0.0 + 0.1 * 0.0
-    assert r.smoothed_reward["a"] == pytest.approx(smoothed_a)
-    assert r.smoothed_reward["b"] == pytest.approx(smoothed_b)
-    # n=2, n-1=1: agent a is ahead -> pays beta * (smoothed_a - smoothed_b);
-    # agent b is behind -> pays alpha * (smoothed_a - smoothed_b).
-    diff = smoothed_a - smoothed_b
+    r.apply({"a": 1.0, "b": 0.0})  # e_a = 0.9*0 + 1.0 = 1.0, e_b = 0.0
+    out = r.apply({"a": 1.0, "b": 0.0})  # e_a = 0.9*1.0 + 1.0 = 1.9, e_b = 0.0
+    assert r.trace["a"] == pytest.approx(1.9)
+    assert r.trace["b"] == pytest.approx(0.0)
+    # n=2, n-1=1: agent a's trace is ahead -> pays its own beta * diff;
+    # agent b's trace is behind -> pays its own alpha * diff.
+    diff = 1.9 - 0.0
     assert out["a"] == pytest.approx(1.0 - 0.2 * diff)
     assert out["b"] == pytest.approx(0.0 - 2.0 * diff)
 
 
-def test_agent_ahead_of_group_is_penalized_by_beta_not_alpha():
+def test_agent_ahead_of_group_pays_smaller_relative_penalty_with_small_beta():
+    # Compare each agent's *penalty magnitude* (raw reward minus adjusted
+    # reward), not an absolute adjusted-reward threshold: the trace's
+    # steady-state scale depends on gamma/trace_lambda, so only the relative
+    # comparison (small beta vs. large alpha) is a robust thing to assert.
     r = InequityAversionReward(
         agent_ids=["a", "b", "c"],
         alpha={aid: 5.0 for aid in ("a", "b", "c")},
@@ -49,19 +56,20 @@ def test_agent_ahead_of_group_is_penalized_by_beta_not_alpha():
     )
     for _ in range(50):
         out = r.apply({"a": 10.0, "b": 0.0, "c": 0.0})
-    # a is far ahead: small beta penalty keeps its adjusted reward close to
-    # its raw reward, much closer than b/c's large alpha penalty pulls theirs.
-    assert out["a"] > 5.0
-    assert out["b"] < 0.0
-    assert out["c"] < 0.0
+    penalty_a = 10.0 - out["a"]  # a is ahead -> pays its small beta
+    penalty_b = 0.0 - out["b"]  # b is behind -> pays its large alpha
+    penalty_c = 0.0 - out["c"]
+    assert penalty_a < penalty_b
+    assert penalty_a < penalty_c
+    assert penalty_b > 0.0 and penalty_c > 0.0
 
 
-def test_reset_clears_smoothed_state():
+def test_reset_clears_trace_state():
     r = InequityAversionReward(agent_ids=["a", "b"], alpha={"a": 1.0, "b": 1.0}, beta={"a": 1.0, "b": 1.0})
     r.apply({"a": 5.0, "b": 0.0})
-    assert r.smoothed_reward["a"] != 0.0
+    assert r.trace["a"] != 0.0
     r.reset()
-    assert r.smoothed_reward == {"a": 0.0, "b": 0.0}
+    assert r.trace == {"a": 0.0, "b": 0.0}
 
 
 def test_higher_alpha_pulls_disadvantaged_agent_reward_down_more():

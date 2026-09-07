@@ -109,16 +109,22 @@ def beam_lines(row: int, col: int, orientation: int, grid_shape: tuple[int, int]
     returned line independently and stop at its own first blocking cell;
     each line is independent (a caller must not break out of the whole
     beam on a per-line stop condition -- one line being blocked doesn't
-    block the other two). The center line starts one cell ahead of the
-    agent; the two side lines are offset by one cell perpendicular to the
-    firing direction, matching `map_env.py::update_map_fire`'s geometry.
+    block the other two). The center line's first cell is one cell ahead of
+    the agent; each side line's first cell is the cell immediately beside
+    the agent (not diagonal -- an earlier version added the perpendicular
+    offset without also stepping back by `fwd` first, so side lines started
+    one cell diagonally forward of the agent and ran one cell short at the
+    far end; caught in review against `map_env.py::update_map_fire`'s
+    `start_pos + right_shift - firing_direction` construction, which is
+    exactly this "step back by fwd before offsetting" correction).
     """
     fwd = DIRS[orientation]
     perp = DIRS[(orientation + 1) % 4]  # perpendicular ("right" of firing direction)
     h, w = grid_shape
     lines = []
     for offset in (0, 1, -1):
-        start_r, start_c = row + perp[0] * offset, col + perp[1] * offset
+        start_r = row + perp[0] * offset - (fwd[0] if offset != 0 else 0)
+        start_c = col + perp[1] * offset - (fwd[1] if offset != 0 else 0)
         line = []
         r, c = start_r, start_c
         for _ in range(BEAM_RANGE):
@@ -158,7 +164,6 @@ class GridAgent:
     col: int
     orientation: int
     reward_this_step: float = 0.0
-    removed_timer: int = 0  # steps remaining removed from the game (hit by FIRE)
 
 
 @dataclass
@@ -167,7 +172,6 @@ class GridWorldConfig:
     width: int = 25
     episode_length: int = 1000
     view_radius: int = _VIEW_RADIUS_DEFAULT
-    removal_steps: int = 50  # steps an agent hit by FIRE is removed from the game
 
 
 class GridWorldEnv:
@@ -226,7 +230,7 @@ class GridWorldEnv:
         return self._observations()
 
     def _occupied_cells(self) -> set[tuple[int, int]]:
-        return {(a.row, a.col) for a in self.agents.values() if a.removed_timer == 0}
+        return {(a.row, a.col) for a in self.agents.values()}
 
     def step(self, actions: dict[str, int]):
         for agent in self.agents.values():
@@ -245,8 +249,6 @@ class GridWorldEnv:
         occupied = self._occupied_cells()
         for agent_id in order:
             agent = self.agents[agent_id]
-            if agent.removed_timer > 0:
-                continue
             action = actions.get(agent_id, STAY)
             if action in (TURN_LEFT, TURN_RIGHT):
                 agent.orientation = rotate_orientation(agent.orientation, action)
@@ -265,8 +267,6 @@ class GridWorldEnv:
 
         # Consume the cell the agent now stands on (e.g. an apple).
         for agent in self.agents.values():
-            if agent.removed_timer > 0:
-                continue
             if self.grid[agent.row, agent.col] == APPLE:
                 agent.reward_this_step += 1.0
                 self.grid[agent.row, agent.col] = EMPTY
@@ -276,14 +276,11 @@ class GridWorldEnv:
         beam_order = list(order)
         self.rng.shuffle(beam_order)
         self._last_beam_cells = []
-        newly_removed = set()
         for agent_id in beam_order:
             agent = self.agents[agent_id]
-            if agent.removed_timer > 0:
-                continue
             action = actions.get(agent_id, STAY)
             if action == FIRE:
-                self._fire_beam(agent, newly_removed)
+                self._fire_beam(agent)
             elif action == CLEAN:
                 agent.reward_this_step += self._custom_action(agent, CLEAN)
             else:
@@ -291,10 +288,6 @@ class GridWorldEnv:
                 # subclasses that add more than one extra action).
                 if action >= NUM_ACTIONS_BASE and action != CLEAN:
                     agent.reward_this_step += self._custom_action(agent, action)
-
-        for agent_id, agent in self.agents.items():
-            if agent.removed_timer > 0 and agent_id not in newly_removed:
-                agent.removed_timer -= 1
 
         self._map_update(self.grid)
 
@@ -307,13 +300,16 @@ class GridWorldEnv:
         infos = {aid: {} for aid in self.agents}
         return observations, rewards, dones, infos
 
-    def _fire_beam(self, agent: GridAgent, newly_removed: set) -> None:
+    def _fire_beam(self, agent: GridAgent) -> None:
+        """The punishment beam is a fine, not a timeout/removal (Hughes et
+        al. 2018 explicitly contrasts this with the earlier SSD literature's
+        timeout-based punishment beam -- caught in review against the
+        primary text; an earlier version of this method incorrectly
+        implemented timeout-based removal instead)."""
         lines = beam_lines(agent.row, agent.col, agent.orientation, self.grid.shape)
         agent.reward_this_step -= 1.0  # cost of firing (paper: -1 for the shooter)
         hit_cells = []
-        pos_to_agent = {
-            (a.row, a.col): a for a in self.agents.values() if a.removed_timer == 0 and a is not agent
-        }
+        pos_to_agent = {(a.row, a.col): a for a in self.agents.values() if a is not agent}
         for line in lines:
             for (r, c) in line:
                 if self.grid[r, c] == WALL:
@@ -321,9 +317,7 @@ class GridWorldEnv:
                 hit_cells.append((r, c))
                 hit_agent = pos_to_agent.get((r, c))
                 if hit_agent is not None:
-                    hit_agent.reward_this_step -= 50.0  # cost of being hit
-                    hit_agent.removed_timer = self.cfg.removal_steps
-                    newly_removed.add(hit_agent.agent_id)
+                    hit_agent.reward_this_step -= 50.0  # the fine
                     break  # this line stops at the agent it hits
         self._last_beam_cells += [(r, c, 0) for (r, c) in hit_cells]
 
@@ -333,8 +327,6 @@ class GridWorldEnv:
         for cell_type, color in _CELL_COLOR.items():
             rgb[self.grid == cell_type] = color
         for agent_id, agent in self.agents.items():
-            if agent.removed_timer > 0:
-                continue
             color = COLOR_SELF if agent_id == viewer_id else COLOR_OTHER
             rgb[agent.row, agent.col] = color
         return rgb

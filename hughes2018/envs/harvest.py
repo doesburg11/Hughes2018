@@ -60,7 +60,7 @@ class HarvestEnv(GridWorldEnv):
             grid[r, c] = APPLE
 
     def _map_update(self, grid: np.ndarray) -> None:
-        occupied = {(a.row, a.col) for a in self.agents.values() if a.removed_timer == 0}
+        occupied = {(a.row, a.col) for a in self.agents.values()}
         h, w = grid.shape
         new_apples = []
         candidates = list(self.apple_cells)

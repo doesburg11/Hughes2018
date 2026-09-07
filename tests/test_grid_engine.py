@@ -5,6 +5,7 @@ import pytest
 
 from hughes2018.envs.grid_engine import (
     APPLE,
+    BEAM_RANGE,
     EMPTY,
     FIRE,
     NORTH,
@@ -76,13 +77,24 @@ def test_beam_lines_center_line_starts_one_cell_ahead():
     assert lines_east[0][0] == (5, 6)
 
 
-def test_beam_lines_side_lines_are_offset_perpendicular():
+def test_beam_lines_side_lines_start_immediately_beside_agent():
+    # Regression test for a review-caught bug: an earlier version's side
+    # lines started diagonally forward of the agent instead of immediately
+    # beside it (same row/col as the agent, only offset perpendicular) --
+    # checking only the column here (as an earlier, weaker version of this
+    # test did) can't distinguish the two, since both put side_a's column at
+    # 6; the row is what actually catches it.
     lines = beam_lines(row=5, col=5, orientation=NORTH, grid_shape=(20, 20))
     _center, side_a, side_b = lines
-    # Facing NORTH, perpendicular ("right") is EAST -> side lines start at
-    # column 6 and column 4.
-    assert side_a[0][1] == 6
-    assert side_b[0][1] == 4
+    # Facing NORTH, perpendicular ("right") is EAST -> the immediate side
+    # cells are (5, 6) and (5, 4), same row as the agent.
+    assert side_a[0] == (5, 6)
+    assert side_b[0] == (5, 4)
+
+
+def test_beam_lines_all_three_lines_have_equal_length_away_from_edges():
+    lines = beam_lines(row=10, col=10, orientation=NORTH, grid_shape=(20, 20))
+    assert len(lines[0]) == len(lines[1]) == len(lines[2]) == BEAM_RANGE
 
 
 def test_beam_lines_truncated_at_grid_edge():
@@ -158,7 +170,11 @@ def test_apple_pickup_gives_reward_and_clears_cell():
     assert env.grid[3, 3] == EMPTY
 
 
-def test_fire_beam_costs_shooter_and_removes_target():
+def test_fire_beam_costs_shooter_and_fines_target():
+    # The punishment beam is a fine, not a timeout/removal -- Hughes et al.
+    # (2018) explicitly contrasts this with the earlier SSD literature's
+    # timeout-based beam (caught in review against the primary text). The
+    # target is fined but keeps acting normally on the very next step.
     env = _DummyEnv(num_agents=2, config=GridWorldConfig(height=10, width=10, episode_length=100))
     shooter, target = env.agents["agent-0"], env.agents["agent-1"]
     shooter.row, shooter.col, shooter.orientation = 5, 5, NORTH
@@ -166,16 +182,11 @@ def test_fire_beam_costs_shooter_and_removes_target():
     _obs, rewards, _dones, _infos = env.step({"agent-0": FIRE, "agent-1": STAY})
     assert rewards["agent-0"] == -1.0
     assert rewards["agent-1"] == -50.0
-    assert target.removed_timer == env.cfg.removal_steps
 
-
-def test_removed_agent_is_excluded_from_occupied_cells_and_observations():
-    env = _DummyEnv(num_agents=2, config=GridWorldConfig(height=10, width=10, episode_length=100))
-    target = env.agents["agent-1"]
-    target.removed_timer = 5
-    obs, _rewards, _dones, _infos = env.step({"agent-0": STAY, "agent-1": STAY})
-    assert "agent-1" in obs  # a removed agent still receives an observation/turn
-    assert target.removed_timer == 4  # cooldown ticks down
+    # Fined agent can still move on the very next step -- no removal/timeout.
+    pos_before = (target.row, target.col)
+    env.step({"agent-0": STAY, "agent-1": STEP_FORWARD})
+    assert (target.row, target.col) != pos_before
 
 
 if __name__ == "__main__":

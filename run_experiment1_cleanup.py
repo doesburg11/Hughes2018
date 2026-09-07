@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Experiment 1: baseline (selfish) vs. inequity-averse agents on Cleanup.
 
 Reproduces the paper's headline comparison (Hughes et al. 2018, Sec. 4):
@@ -32,9 +33,12 @@ def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
     print(f"\n=== Condition: {name} ===")
     rng = np.random.default_rng(args.seed)
     env = CleanupEnv(num_agents=args.num_agents, config=GridWorldConfig(episode_length=args.episode_length), rng=rng)
+    obs_hw = 2 * env.cfg.view_radius + 1
     agents = {
         f"agent-{i}": ActorCriticAgent(
             obs_channels=3,
+            obs_height=obs_hw,
+            obs_width=obs_hw,
             config=ActorCriticConfig(num_actions=env.num_actions, seed=args.seed + i, learning_rate=args.lr),
             device=args.device,
         )
@@ -56,7 +60,7 @@ def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
             agent_ids=agent_ids,
             alpha={aid: float(alpha_rng.uniform(2.4, 3.0)) for aid in agent_ids},
             beta={aid: float(alpha_rng.uniform(0.16, 0.20)) for aid in agent_ids},
-            smoothing=args.inequity_smoothing,
+            trace_lambda=args.inequity_trace_lambda,
         )
 
     def on_log(stats):
@@ -88,7 +92,7 @@ def main():
     parser.add_argument("--total-steps", type=int, default=20_000, help="Smoke-test scale by default.")
     parser.add_argument("--rollout-length", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--inequity-smoothing", type=float, default=0.95)
+    parser.add_argument("--inequity-trace-lambda", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--out-dir", type=str, default="output/run_experiment1_cleanup")
