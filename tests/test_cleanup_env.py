@@ -20,26 +20,34 @@ def _make_env(num_agents=2, seed=0):
     return CleanupEnv(num_agents=num_agents, config=GridWorldConfig(episode_length=1000), rng=rng)
 
 
-def test_river_starts_fully_polluted_and_orchard_empty():
+def test_river_starts_just_beyond_depletion_threshold_not_fully_saturated():
+    # Hughes et al. (2018): "the environment resets with waste just beyond
+    # this saturation point" -- an earlier version of this env started with
+    # the *entire* river as waste (density 1.0) instead, caught by reading
+    # the paper's own stated reset condition directly.
     env = _make_env()
-    assert all(env.grid[r, c] == WASTE for (r, c) in env.river_cells)
+    waste_count = sum(1 for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
+    density = waste_count / len(env.river_cells)
+    assert 0.40 <= density <= 0.45  # RESET_WASTE_DENSITY=0.42, just past THRESHOLD_DEPLETION=0.4
+    assert density < 0.9  # nowhere near full saturation
     assert all(env.grid[r, c] != APPLE for (r, c) in env.apple_cells)
 
 
 def test_clean_action_converts_first_waste_cell_on_the_beam():
     env = _make_env(num_agents=1)
     agent = env.agents["agent-0"]
-    # Face the agent at a known waste cell, one cell south of it.
-    target_r, target_c = env.river_cells[0]
+    # Only ~42% of river cells are waste at reset (RESET_WASTE_DENSITY), so
+    # river_cells[0] specifically isn't guaranteed to be one -- find an
+    # actual waste cell instead of assuming a fixed index.
+    target_r, target_c = next((r, c) for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
     agent.row, agent.col, agent.orientation = target_r + 1, target_c, NORTH
-    assert env.grid[target_r, target_c] == WASTE
     env.step({"agent-0": CLEAN})
     assert env.grid[target_r, target_c] == RIVER
 
 
 def test_apple_spawn_probability_is_zero_above_depletion_threshold():
     env = _make_env(num_agents=1)
-    env._compute_spawn_probabilities(env.grid)  # river is 100% waste at reset
+    env._compute_spawn_probabilities(env.grid)  # reset density (0.42) is already just past the threshold
     assert env.current_apple_spawn_prob == 0.0
     assert env.current_waste_spawn_prob == 0.0  # also stops spawning more waste once saturated
 
@@ -54,6 +62,12 @@ def test_apple_spawn_probability_is_maximal_when_river_is_clean():
 
 def test_apple_spawn_probability_interpolates_between_thresholds():
     env = _make_env(num_agents=1)
+    # Explicitly set a known waste state for all river cells first (rather
+    # than relying on the reset's own ~42%-random state for the "untouched"
+    # half), so the expected waste_density below is exact regardless of
+    # RESET_WASTE_DENSITY.
+    for (r, c) in env.river_cells:
+        env.grid[r, c] = WASTE
     # Half the river cleaned -> waste_density = 0.5 * THRESHOLD_DEPLETION,
     # i.e. halfway through the interpolation range -> half the max apple
     # spawn probability.

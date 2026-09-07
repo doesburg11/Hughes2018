@@ -43,6 +43,17 @@ THRESHOLD_RESTORATION = 0.0
 WASTE_SPAWN_PROBABILITY = 0.5
 APPLE_RESPAWN_PROBABILITY = 0.05
 
+# Hughes et al. (2018), Sec. 2.4: "At the start of each episode, the
+# environment resets with waste just beyond this saturation point" -- i.e.
+# just past THRESHOLD_DEPLETION, not fully saturated. An earlier version of
+# this env filled the *entire* river with waste at reset (density 1.0),
+# requiring far more cleaning before any apple could possibly spawn than the
+# paper's own design; caught by reading the primary source directly. The
+# paper doesn't give an exact margin past the threshold, so 0.42 (a modest,
+# documented margin above 0.4) is this repo's own interpretation of "just
+# beyond", not a verified reproduction of a specific unstated number.
+RESET_WASTE_DENSITY = 0.42
+
 
 class CleanupEnv(GridWorldEnv):
     num_actions = NUM_ACTIONS_CLEANUP
@@ -90,11 +101,16 @@ class CleanupEnv(GridWorldEnv):
         return self.spawn_cells
 
     def _reset_cells(self, grid: np.ndarray) -> None:
-        # Training episodes start with the river fully polluted and the
-        # orchard empty, matching the paper's own training initialization
-        # (and McKee et al. 2023's Fig. S3, which documents inheriting this
-        # from Hughes et al. 2018's setup).
-        for (r, c) in self.river_cells:
+        # Waste starts at RESET_WASTE_DENSITY (see its docstring) -- just
+        # beyond THRESHOLD_DEPLETION, not the whole river -- matching the
+        # paper's own stated reset condition. The orchard starts empty
+        # either way, since current_apple_spawn_prob starts at 0 regardless
+        # (apples can't spawn above THRESHOLD_DEPLETION, which this reset
+        # density is chosen to just exceed).
+        num_waste_cells = round(RESET_WASTE_DENSITY * len(self.river_cells))
+        cells = list(self.river_cells)
+        self.rng.shuffle(cells)
+        for (r, c) in cells[:num_waste_cells]:
             grid[r, c] = WASTE
         self.potential_waste_area = len(self.river_cells)
         self.current_apple_spawn_prob = 0.0

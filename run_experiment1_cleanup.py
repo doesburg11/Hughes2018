@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
-"""Experiment 1: baseline (selfish) vs. inequity-averse agents on Cleanup.
+"""Experiment 1: baseline vs. inequity-averse agents on Cleanup.
 
-Reproduces the paper's headline comparison (Hughes et al. 2018, Sec. 4):
-does the inequity-aversion reward improve collective return in Cleanup?
+Reproduces the paper's headline Cleanup comparison (Hughes et al. 2018,
+Fig. 3): does inequity aversion improve collective return? Critically, the
+paper's Fig. 3 tests *advantageous* inequity aversion (guilt, the beta term
+alone, alpha=0) and *disadvantageous* inequity aversion (envy, alpha alone)
+*separately* -- Fig. 3(A-C) shows advantageous inequity aversion helps
+Cleanup; Fig. 3(D-F) explicitly states "disadvantageous inequity aversion
+does not promote greater cooperation in the Cleanup game." Neither panel
+tests the two combined. This script runs three conditions:
+
+  - "baseline": no inequity term (vanilla A3C-equivalent).
+  - "advantageous_only": beta term only (alpha=0) -- the condition the
+    paper's own Fig. 3(A-C) shows actually helps Cleanup.
+  - "both": alpha and beta together (this repo's original, broader
+    condition, kept for reference -- not one of the paper's own two tested
+    Cleanup conditions, so a null/mixed result here doesn't contradict the
+    paper the way a null "advantageous_only" result would).
 
 Defaults to a small step count as a smoke test that exercises the full
 pipeline (env -> independent actor-critic training -> inequity aversion ->
@@ -29,7 +43,46 @@ from hughes2018.reward.inequity_aversion import InequityAversionReward, scaled_a
 from hughes2018.training.loop import train
 
 
-def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
+def build_inequity_reward(
+    agent_ids: list[str], inequity_mode: str, trace_lambda: float, seed: int
+) -> InequityAversionReward | None:
+    """inequity_mode: "none" | "advantageous_only" | "both" -- see module docstring.
+
+    Split out from run_condition() specifically so the alpha=0 wiring for
+    "advantageous_only" (the paper's actual tested Cleanup condition) can be
+    checked directly in a test, rather than only indirectly via a full
+    training run's return statistics -- a silently-wrong alpha here (e.g.
+    accidentally sampling it instead of zeroing it) wouldn't otherwise be
+    caught by anything short of a training run failing to reproduce the
+    paper's result, which is exactly the kind of quiet calibration bug this
+    repo has already hit more than once.
+    """
+    if inequity_mode == "none":
+        return None
+    alpha_rng = np.random.default_rng(seed + 1000)
+    # Amplification-corrected ranges (see scaled_alpha_beta_range's
+    # docstring): the base 2.4-3.0/0.16-0.20 range was tuned for a bounded,
+    # reward-scale quantity elsewhere; this trace is unnormalized and runs
+    # ~1/(1-gamma*trace_lambda) larger, so the base range is divided by that
+    # factor to keep the effective penalty on a comparable scale to the
+    # extrinsic reward.
+    alpha_range, beta_range = scaled_alpha_beta_range(gamma=0.99, trace_lambda=trace_lambda)
+    if inequity_mode == "advantageous_only":
+        alpha = {aid: 0.0 for aid in agent_ids}  # no envy term -- matches the paper's Fig. 3(A-C) condition
+    elif inequity_mode == "both":
+        alpha = {aid: float(alpha_rng.uniform(*alpha_range)) for aid in agent_ids}
+    else:
+        raise ValueError(f"Unknown inequity_mode: {inequity_mode!r}")
+    return InequityAversionReward(
+        agent_ids=agent_ids,
+        alpha=alpha,
+        beta={aid: float(alpha_rng.uniform(*beta_range)) for aid in agent_ids},
+        trace_lambda=trace_lambda,
+    )
+
+
+def run_condition(name: str, inequity_mode: str, args) -> dict:
+    """inequity_mode: "none" | "advantageous_only" | "both" -- see module docstring."""
     print(f"\n=== Condition: {name} ===")
     rng = np.random.default_rng(args.seed)
     env = CleanupEnv(num_agents=args.num_agents, config=GridWorldConfig(episode_length=args.episode_length), rng=rng)
@@ -44,23 +97,9 @@ def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
         )
         for i in range(args.num_agents)
     }
-    inequity_reward = None
-    if use_inequity_reward:
-        agent_ids = list(agents.keys())
-        alpha_rng = np.random.default_rng(args.seed + 1000)
-        # Amplification-corrected ranges (see scaled_alpha_beta_range's
-        # docstring): the base 2.4-3.0/0.16-0.20 range was tuned for a
-        # bounded, reward-scale quantity elsewhere; this trace is
-        # unnormalized and runs ~1/(1-gamma*trace_lambda) larger, so the
-        # base range is divided by that factor to keep the effective
-        # penalty on a comparable scale to the extrinsic reward.
-        alpha_range, beta_range = scaled_alpha_beta_range(gamma=0.99, trace_lambda=args.inequity_trace_lambda)
-        inequity_reward = InequityAversionReward(
-            agent_ids=agent_ids,
-            alpha={aid: float(alpha_rng.uniform(*alpha_range)) for aid in agent_ids},
-            beta={aid: float(alpha_rng.uniform(*beta_range)) for aid in agent_ids},
-            trace_lambda=args.inequity_trace_lambda,
-        )
+    inequity_reward = build_inequity_reward(
+        list(agents.keys()), inequity_mode, args.inequity_trace_lambda, args.seed
+    )
 
     def on_log(stats):
         recent = stats.episode_returns[-5:]
@@ -106,8 +145,9 @@ def main():
     args = parser.parse_args()
 
     results = {
-        "baseline": run_condition("baseline (selfish)", use_inequity_reward=False, args=args),
-        "inequity_averse": run_condition("inequity-averse", use_inequity_reward=True, args=args),
+        "baseline": run_condition("baseline", inequity_mode="none", args=args),
+        "advantageous_only": run_condition("advantageous-only (guilt)", inequity_mode="advantageous_only", args=args),
+        "both": run_condition("inequity-averse (both)", inequity_mode="both", args=args),
     }
 
     out_dir = Path(args.out_dir)
@@ -115,20 +155,21 @@ def main():
     with open(out_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2)
 
-    baseline_mean = results["baseline"]["mean_collective_return"]
-    inequity_mean = results["inequity_averse"]["mean_collective_return"]
+    means = {k: v["mean_collective_return"] for k, v in results.items()}
     print("\n=== Summary ===")
-    print(f"baseline mean collective return:        {baseline_mean}")
-    print(f"inequity-averse mean collective return: {inequity_mean}")
+    print(f"baseline mean collective return:                    {means['baseline']}")
+    print(f"advantageous-only (guilt) mean collective return:   {means['advantageous_only']}  <- paper's tested condition")
+    print(f"inequity-averse (both) mean collective return:      {means['both']}")
     print(f"Wrote results to {out_dir / 'results.json'}")
 
     try:
         import matplotlib.pyplot as plt
 
         fig, ax = plt.subplots()
-        ax.bar(["baseline", "inequity-averse"], [baseline_mean or 0, inequity_mean or 0])
+        labels = ["baseline", "advantageous-only\n(guilt)", "inequity-averse\n(both)"]
+        ax.bar(labels, [means["baseline"] or 0, means["advantageous_only"] or 0, means["both"] or 0])
         ax.set_ylabel("Mean collective return")
-        ax.set_title("Cleanup: baseline vs. inequity-averse agents")
+        ax.set_title("Cleanup: baseline vs. inequity-averse conditions")
         fig.savefig(out_dir / "collective_return.png")
         print(f"Wrote plot to {out_dir / 'collective_return.png'}")
     except ImportError:

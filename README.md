@@ -29,6 +29,8 @@ inequity_penalty_i = (alpha_i / (n-1)) * sum_j max(e_j - e_i, 0)     # envy
 
 **Matched, from the paper's own stated design:**
 - Both environments' core dynamics: Cleanup's piecewise-linear apple-regrowth-vs-river-pollution curve (`THRESHOLD_DEPLETION=0.4`, `THRESHOLD_RESTORATION=0.0`, `WASTE_SPAWN_PROBABILITY=0.5`, `APPLE_RESPAWN_PROBABILITY=0.05`) and Harvest's local-density-dependent regrowth (`SPAWN_PROBABILITY_BY_NEIGHBOR_COUNT = (0.0, 0.005, 0.02, 0.05)` indexed by nearby-apple count in a Moore neighborhood) — these are the paper's own environment mechanics (independently corroborated by Vinitsky et al.'s port and McKee et al. 2023's reuse of the same Cleanup design, not copied from either).
+- Cleanup's episode-reset waste level: "the environment resets with waste **just beyond this saturation point**" (Sec. 2.4) — `RESET_WASTE_DENSITY=0.42`, just past `THRESHOLD_DEPLETION=0.4`, not the whole river. (An earlier version of this repo filled the entire river with waste at reset instead — density 1.0 — requiring far more cleaning before any apple could possibly spawn than the paper's own design; caught by reading the primary source directly, not by inspection.)
+- **Advantageous vs. disadvantageous inequity aversion tested separately for Cleanup**, matching the paper's own Fig. 3: "(A-C) compares... A3C and advantageous inequity averse agents... (D-F) demonstrate that disadvantageous inequity aversion does not promote greater cooperation in the Cleanup game." `run_experiment1_cleanup.py` runs three conditions — `baseline`, `advantageous_only` (guilt, `alpha=0` — the condition the paper shows actually helps Cleanup), and `both` (this repo's original combined condition, kept for reference but *not* one of the paper's own two tested Cleanup conditions). An earlier version of this repo only ever tested the combined condition, which conflates the paper's two separately-tested and differently-behaving mechanisms; caught by reading the primary source, not by inspection.
 - The shared action set (move forward/backward/strafe-left/strafe-right relative to current facing, turn left/right, stay, a beam) and 3-cell-wide, 5-cell-long beam geometry.
 - The punishment beam is a *fine* (target loses 50 reward, shooter pays 1), not a timeout/removal — the paper explicitly contrasts this with the earlier SSD literature's timeout-based beam. (An earlier version of this repo implemented timeout-based removal instead; caught in review against the primary text.)
 - The network architecture explicitly stated (by McKee et al. 2023's Materials and Methods) to be inherited from this paper's own setup: 3x3-kernel/32-channel conv, two 64-unit FC layers, a 128-unit LSTM, linear policy/value heads.
@@ -58,7 +60,7 @@ pytest tests/ -q
 Every `run_experiment*.py` script defaults to a small step count that exercises the full pipeline (env → independent actor-critic training → inequity-aversion reward → comparison) as a smoke test — it does not claim converged, paper-scale results. Pass `--total-steps` with a much larger value (and patience, or a GPU via `--device cuda`) to attempt that.
 
 ```bash
-python run_experiment1_cleanup.py     # Cleanup: baseline vs. inequity-averse
+python run_experiment1_cleanup.py     # Cleanup: baseline vs. advantageous-only (paper's condition) vs. both
 python run_experiment2_harvest.py     # Harvest: baseline vs. inequity-averse
 python run_experiment3_heterogeneous.py   # mixed population: some inequity-averse, some selfish
 ```
