@@ -65,6 +65,33 @@ def test_update_runs_and_changes_every_named_parameter():
     assert not unchanged, f"parameters that did not update: {unchanged}"
 
 
+def test_save_load_roundtrip_reproduces_policy(tmp_path):
+    agent = _make_agent(seed=0)
+    # Train briefly so weights differ from their random init -- otherwise a
+    # save/load bug that silently kept the freshly-initialized weights
+    # instead of the saved ones could go unnoticed.
+    rollout = Rollout(initial_lstm_state=agent.network.initial_state(1, agent.device))
+    for t in range(5):
+        obs = _random_obs()
+        action, _lp, _v, _s = agent.act(obs)
+        rollout.obs.append(obs)
+        rollout.actions.append(action)
+        rollout.rewards.append(1.0 if t == 4 else 0.0)
+        rollout.dones.append(False)
+    agent.update(rollout)
+
+    checkpoint_path = tmp_path / "agent.pt"
+    agent.save(checkpoint_path)
+
+    fresh_agent = _make_agent(seed=999)  # different seed -> different random init
+    before_load = {name: p.clone() for name, p in fresh_agent.network.named_parameters()}
+    fresh_agent.load(checkpoint_path)
+
+    for name, p in fresh_agent.network.named_parameters():
+        assert not torch.equal(before_load[name], p), f"{name} unchanged by load()"
+        assert torch.equal(dict(agent.network.named_parameters())[name], p), f"{name} doesn't match saved agent"
+
+
 def test_update_return_matches_hand_computed_discounted_sum():
     agent = _make_agent(discount=0.9)
     rollout = Rollout(initial_lstm_state=agent.network.initial_state(1, agent.device))

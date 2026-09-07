@@ -75,6 +75,14 @@ def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
         inequity_reward=inequity_reward,
         on_log=on_log,
     )
+
+    condition_slug = name.split(" ")[0].replace("(", "").replace(")", "")  # "baseline" / "inequity-averse"
+    checkpoint_dir = Path(args.out_dir) / "checkpoints" / condition_slug
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    for agent_id, agent in agents.items():
+        agent.save(checkpoint_dir / f"{agent_id}.pt")
+    print(f"  Wrote checkpoints to {checkpoint_dir}")
+
     return {
         "condition": name,
         "total_steps": stats.total_steps,

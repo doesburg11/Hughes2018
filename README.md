@@ -63,7 +63,19 @@ python run_experiment2_harvest.py     # Harvest: baseline vs. inequity-averse
 python run_experiment3_heterogeneous.py   # mixed population: some inequity-averse, some selfish
 ```
 
-Each writes `results.json` (and, if `matplotlib` is available, a comparison plot) to `output/<script-name>/`.
+Each writes `results.json` (and, if `matplotlib` is available, a comparison plot) to `output/<script-name>/`, and now also saves each trained agent's weights to `output/<script-name>/checkpoints/<condition>/<agent-id>.pt` (network weights only, not optimizer/LSTM state -- a checkpoint here is for evaluation, not resuming training).
+
+## Watching a trained policy
+
+`render_rollout.py` plays out one episode and renders it to an animated GIF, using the env's own third-person `render()` frame (upscaled with nearest-neighbor resizing so cells stay crisp):
+
+```bash
+python render_rollout.py --env cleanup                                                     # random policy
+python render_rollout.py --env cleanup --checkpoint-dir output/run_experiment1_cleanup/checkpoints/baseline
+python render_rollout.py --env harvest --checkpoint-dir output/run_experiment2_harvest/checkpoints/inequity-averse
+```
+
+Writes to `output/render_rollout/<env>_<random|trained>.gif` by default (override with `--out`).
 
 ## Known gaps from the paper
 

@@ -112,6 +112,14 @@ class ActorCriticAgent:
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.cfg.learning_rate)
         self.lstm_state = self.network.initial_state(1, self.device)
 
+    def save(self, path) -> None:
+        """Save network weights only (not optimizer state or LSTM state --
+        a checkpoint is for evaluation/rendering, not resuming training)."""
+        torch.save(self.network.state_dict(), path)
+
+    def load(self, path) -> None:
+        self.network.load_state_dict(torch.load(path, map_location=self.device))
+
     def reset_lstm_state(self) -> None:
         self.lstm_state = self.network.initial_state(1, self.device)
 

@@ -1,4 +1,5 @@
 numpy
 torch
 matplotlib
+pillow
 pytest
