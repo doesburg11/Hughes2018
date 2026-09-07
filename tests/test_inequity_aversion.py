@@ -6,7 +6,25 @@ EWMA-average version of this formula; see the module docstring."""
 
 import pytest
 
-from hughes2018.reward.inequity_aversion import InequityAversionReward
+from hughes2018.reward.inequity_aversion import InequityAversionReward, scaled_alpha_beta_range
+
+
+def test_scaled_alpha_beta_range_matches_hand_computed_amplification():
+    # gamma=0.99, trace_lambda=0.95 -> decay=0.9405 -> amplification
+    # 1/(1-0.9405) = 16.8067...
+    alpha_range, beta_range = scaled_alpha_beta_range(gamma=0.99, trace_lambda=0.95)
+    amplification = 1.0 / (1.0 - 0.99 * 0.95)
+    assert alpha_range[0] == pytest.approx(2.4 / amplification)
+    assert alpha_range[1] == pytest.approx(3.0 / amplification)
+    assert beta_range[0] == pytest.approx(0.16 / amplification)
+    assert beta_range[1] == pytest.approx(0.20 / amplification)
+
+
+def test_scaled_alpha_beta_range_shrinks_as_trace_lambda_grows():
+    # A longer-memory trace amplifies more, so the corrected range must be smaller.
+    low_lambda_range, _ = scaled_alpha_beta_range(gamma=0.99, trace_lambda=0.5)
+    high_lambda_range, _ = scaled_alpha_beta_range(gamma=0.99, trace_lambda=0.99)
+    assert high_lambda_range[1] < low_lambda_range[1]
 
 
 def test_requires_alpha_beta_for_every_agent():

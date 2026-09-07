@@ -48,6 +48,39 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def scaled_alpha_beta_range(
+    gamma: float,
+    trace_lambda: float,
+    base_alpha_range: tuple[float, float] = (2.4, 3.0),
+    base_beta_range: tuple[float, float] = (0.16, 0.20),
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Amplification-corrected alpha/beta sampling ranges.
+
+    The base ranges above are the same `alpha ~ U(2.4, 3.0)`, `beta ~
+    U(0.16, 0.20)` used for the reward term in the sibling
+    SequentialSocialDilemmas repo's `cleanup_reputation` experiment -- tuned
+    there for a bounded, reward-scale quantity. This trace is instead
+    unnormalized and settles near `1 / (1 - gamma*trace_lambda)` times the
+    raw reward's scale (module docstring), so applying those same ranges
+    directly to *this* trace produces a penalty an order of magnitude too
+    large relative to the extrinsic reward -- confirmed empirically (a short
+    diagnostic run showed the inequity-averse condition's collective return
+    staying far below, and not improving relative to, the baseline
+    condition's, consistent with the penalty dominating the signal rather
+    than shaping it). Dividing by the same amplification factor keeps the
+    *effective* penalty on roughly the scale the base ranges were tuned for,
+    regardless of which `gamma`/`trace_lambda` end up in use.
+
+    This is a documented calibration choice, not a citation-backed number
+    from Hughes et al. (2018)'s own primary text either way -- see the
+    top-level README.
+    """
+    amplification = 1.0 / (1.0 - gamma * trace_lambda)
+    alpha_lo, alpha_hi = base_alpha_range
+    beta_lo, beta_hi = base_beta_range
+    return (alpha_lo / amplification, alpha_hi / amplification), (beta_lo / amplification, beta_hi / amplification)
+
+
 @dataclass
 class InequityAversionReward:
     agent_ids: list[str]

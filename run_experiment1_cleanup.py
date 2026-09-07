@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from hughes2018.agents.actor_critic import ActorCriticAgent, ActorCriticConfig
 from hughes2018.envs.cleanup import CleanupEnv
 from hughes2018.envs.grid_engine import GridWorldConfig
-from hughes2018.reward.inequity_aversion import InequityAversionReward
+from hughes2018.reward.inequity_aversion import InequityAversionReward, scaled_alpha_beta_range
 from hughes2018.training.loop import train
 
 
@@ -48,18 +48,17 @@ def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
     if use_inequity_reward:
         agent_ids = list(agents.keys())
         alpha_rng = np.random.default_rng(args.seed + 1000)
-        # alpha ~ U(2.4, 3.0), beta ~ U(0.16, 0.20): the same population-
-        # heterogeneity sampling range used for the reputation reward in the
-        # sibling SequentialSocialDilemmas repo's cleanup_reputation
-        # experiment (documented there as inherited from this lineage of
-        # papers' typical parameterization; not a verified reproduction of a
-        # specific number this paper states, since this paper's own
-        # alpha/beta ranges aren't quoted here from primary text -- see
-        # README "What's simplified vs. the paper").
+        # Amplification-corrected ranges (see scaled_alpha_beta_range's
+        # docstring): the base 2.4-3.0/0.16-0.20 range was tuned for a
+        # bounded, reward-scale quantity elsewhere; this trace is
+        # unnormalized and runs ~1/(1-gamma*trace_lambda) larger, so the
+        # base range is divided by that factor to keep the effective
+        # penalty on a comparable scale to the extrinsic reward.
+        alpha_range, beta_range = scaled_alpha_beta_range(gamma=0.99, trace_lambda=args.inequity_trace_lambda)
         inequity_reward = InequityAversionReward(
             agent_ids=agent_ids,
-            alpha={aid: float(alpha_rng.uniform(2.4, 3.0)) for aid in agent_ids},
-            beta={aid: float(alpha_rng.uniform(0.16, 0.20)) for aid in agent_ids},
+            alpha={aid: float(alpha_rng.uniform(*alpha_range)) for aid in agent_ids},
+            beta={aid: float(alpha_rng.uniform(*beta_range)) for aid in agent_ids},
             trace_lambda=args.inequity_trace_lambda,
         )
 
