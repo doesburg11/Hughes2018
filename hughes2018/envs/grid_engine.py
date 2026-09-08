@@ -43,6 +43,17 @@ CLEAN = 8  # Cleanup-only
 NUM_ACTIONS_BASE = 8  # Harvest's action space size
 NUM_ACTIONS_CLEANUP = 9  # Harvest's actions + CLEAN
 
+# DeepMind's reference implementation of this environment
+# (github.com/google-deepmind/lab2d/tree/main/dmlab2d/lib/game_scripts/levels/clean_up,
+# avatar.lua's `fineWait`/`cleanWait`) rate-limits both beams -- an agent
+# that fires must wait this many steps before firing that same beam type
+# again. Not mentioned in the paper's own prose, found only by reading the
+# reference code; not previously implemented here, so agents could fire
+# every step. FIRE_COOLDOWN_STEPS is shared by both games (the paper: "all
+# agents are equipped with a fining beam" in both Cleanup and Harvest);
+# CLEAN_COOLDOWN_STEPS is Cleanup-only, set via GridWorldEnv.clean_cooldown_steps.
+FIRE_COOLDOWN_STEPS = 10
+
 # Cell types.
 EMPTY, WALL, APPLE, WASTE, RIVER, SPAWN = 0, 1, 2, 3, 4, 5
 
@@ -164,6 +175,8 @@ class GridAgent:
     col: int
     orientation: int
     reward_this_step: float = 0.0
+    fire_cooldown: int = 0  # steps remaining before FIRE is usable again
+    clean_cooldown: int = 0  # steps remaining before CLEAN is usable again
 
 
 @dataclass
@@ -190,6 +203,8 @@ class GridWorldEnv:
     """
 
     num_actions: int = NUM_ACTIONS_BASE
+    fire_cooldown_steps: int = FIRE_COOLDOWN_STEPS
+    clean_cooldown_steps: int = 0  # no CLEAN action in the base engine; CleanupEnv overrides this
 
     def __init__(self, num_agents: int, config: GridWorldConfig | None = None, rng: np.random.Generator | None = None):
         self.num_agents = num_agents
@@ -273,21 +288,42 @@ class GridWorldEnv:
 
         # Beams (FIRE, and CLEAN for Cleanup), random order for the same
         # reason movement is randomized (no fixed-agent-index priority).
+        # Each beam type has its own independent cooldown counter, ticked
+        # down every step regardless of which action was actually taken
+        # this step (matching the reference implementation's semantics --
+        # see FIRE_COOLDOWN_STEPS) -- so an agent that fires must wait
+        # `fire_cooldown_steps`/`clean_cooldown_steps` steps before that
+        # same beam type is usable again.
         beam_order = list(order)
         self.rng.shuffle(beam_order)
         self._last_beam_cells = []
         for agent_id in beam_order:
             agent = self.agents[agent_id]
             action = actions.get(agent_id, STAY)
-            if action == FIRE:
+
+            if agent.fire_cooldown > 0:
+                agent.fire_cooldown -= 1
+            elif action == FIRE:
+                agent.fire_cooldown = self.fire_cooldown_steps
                 self._fire_beam(agent)
+
+            if agent.clean_cooldown > 0:
+                agent.clean_cooldown -= 1
             elif action == CLEAN:
+                agent.clean_cooldown = self.clean_cooldown_steps
                 agent.reward_this_step += self._custom_action(agent, CLEAN)
-            else:
+
+            if action >= NUM_ACTIONS_BASE and action != CLEAN:
                 # Non-beam custom actions (currently unused, reserved for
-                # subclasses that add more than one extra action).
-                if action >= NUM_ACTIONS_BASE and action != CLEAN:
-                    agent.reward_this_step += self._custom_action(agent, action)
+                # subclasses that add more than one extra action beyond
+                # CLEAN -- CLEAN itself is already handled above). Deliberately
+                # its own independent check, not chained onto clean_cooldown's
+                # if/elif: an earlier version chained it there, so whenever an
+                # agent happened to be on CLEAN's cooldown, any *other*,
+                # unrelated custom action would be silently skipped too --
+                # dormant today (no subclass defines one yet) but a real bug
+                # for whichever subclass adds the first one.
+                agent.reward_this_step += self._custom_action(agent, action)
 
         self._map_update(self.grid)
 

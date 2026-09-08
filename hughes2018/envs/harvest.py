@@ -2,13 +2,19 @@
 
 Apples regrow faster where more apples already stand nearby, so harvesting
 too aggressively collapses the local regrowth rate for everyone, including
-the harvester. Regrowth probability is a function of the count of apples in
-a Moore (3x3) neighborhood around a given empty cell -- 0 nearby apples means
-that cell can never regrow (permanent local extinction is possible), more
-nearby apples means faster regrowth. `SPAWN_PROBABILITY_BY_NEIGHBOR_COUNT`
-below is the paper's own stated regrowth curve (also independently
-transcribed in Vinitsky et al.'s port, since it's the paper's mechanic, not
-an implementation detail specific to either repo).
+the harvester. Regrowth probability is a function of the count of apples
+within an L1 (Manhattan) radius of 2 of a given empty cell -- Hughes et al.
+(2018), Sec. A.3: "apples spawn relative to the current number of other
+apples within an l1 radius of 2." (An earlier version of this env used a
+Moore/Chebyshev-radius-1 neighborhood instead -- 8 cells, missing the 4
+cells 2 steps away along each cardinal direction that an L1-radius-2 ball
+includes -- caught by reading the primary source's parameter appendix
+directly, not by inspection.) 0 nearby apples means that cell can never
+regrow (permanent local extinction is possible), more nearby apples means
+faster regrowth. `SPAWN_PROBABILITY_BY_NEIGHBOR_COUNT` below is the paper's
+own stated regrowth curve (also independently transcribed in Vinitsky et
+al.'s port, since it's the paper's mechanic, not an implementation detail
+specific to either repo).
 """
 
 from __future__ import annotations
@@ -27,7 +33,12 @@ from hughes2018.envs.grid_engine import (
 # Indexed by min(nearby_apple_count, 3): 0 neighbors -> can't regrow, 1/2/3+
 # neighbors -> increasingly likely to regrow this step.
 SPAWN_PROBABILITY_BY_NEIGHBOR_COUNT = (0.0, 0.005, 0.02, 0.05)
-NEIGHBOR_OFFSETS = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1) if not (dr == 0 and dc == 0)]
+# L1 (Manhattan) ball of radius 2, excluding the center cell itself: 12 cells
+# -- 4 at distance 1 (cardinal), 4 at distance 2 (cardinal), 4 at distance 2
+# (diagonal).
+NEIGHBOR_OFFSETS = [
+    (dr, dc) for dr in range(-2, 3) for dc in range(-2, 3) if 0 < abs(dr) + abs(dc) <= 2
+]
 
 
 class HarvestEnv(GridWorldEnv):

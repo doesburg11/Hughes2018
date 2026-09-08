@@ -20,15 +20,17 @@ def test_orchard_starts_full():
 def test_isolated_empty_cell_never_regrows():
     env = _make_env(num_agents=0)
     r, c = 8, 8
-    # Re-clear the Moore neighborhood every iteration, not just once: apples
-    # from outside the block can spread inward over many steps, eventually
-    # giving (r, c) nonzero neighbors indirectly even though it started
-    # isolated -- the point of this test is the *local* 0-neighbor rule, so
-    # the neighborhood must stay empty at the moment each check runs.
+    # Re-clear the full L1-radius-2 neighborhood every iteration, not just
+    # once: apples from outside the block can spread inward over many
+    # steps, eventually giving (r, c) nonzero neighbors indirectly even
+    # though it started isolated -- the point of this test is the *local*
+    # 0-neighbor rule, so the neighborhood must stay empty at the moment
+    # each check runs.
     for _ in range(200):
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
-                env.grid[r + dr, c + dc] = EMPTY
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                if abs(dr) + abs(dc) <= 2:
+                    env.grid[r + dr, c + dc] = EMPTY
         env._map_update(env.grid)
         assert env.grid[r, c] == EMPTY  # 0-neighbor probability is exactly 0.0
 
@@ -36,7 +38,7 @@ def test_isolated_empty_cell_never_regrows():
 def test_dense_neighborhood_regrows_eventually():
     env = _make_env(num_agents=0, seed=2)
     r, c = 8, 8
-    env.grid[r, c] = EMPTY  # every neighbor stays APPLE -> 8 neighbors -> max spawn prob
+    env.grid[r, c] = EMPTY  # every neighbor stays APPLE -> 12 neighbors -> max spawn prob
     regrew = False
     for _ in range(500):
         env._map_update(env.grid)

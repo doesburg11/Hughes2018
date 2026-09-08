@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 output/
+logs/
 *.egg-info/
 .conda/

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from hughes2018.envs.cleanup import CleanupEnv
+from hughes2018.envs.cleanup import APPLE_RESPAWN_PROBABILITY, DIRT_GROWTH_START_TIME, CleanupEnv
 from hughes2018.envs.grid_engine import (
     APPLE,
     CLEAN,
@@ -45,6 +45,73 @@ def test_clean_action_converts_first_waste_cell_on_the_beam():
     assert env.grid[target_r, target_c] == RIVER
 
 
+def test_clean_beam_has_a_cooldown_before_it_can_be_used_again():
+    # Regression test for a gap caught by reading DeepMind's own reference
+    # implementation of this environment: agents could clean every single
+    # step, with no rate limit -- the reference implementation cools down
+    # for CleanupEnv.clean_cooldown_steps (2) steps after each use.
+    env = _make_env(num_agents=1)
+    agent = env.agents["agent-0"]
+
+    def clean_next_waste_cell():
+        target = next((r, c) for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
+        agent.row, agent.col, agent.orientation = target[0] + 1, target[1], NORTH
+        env.step({"agent-0": CLEAN})
+        return target
+
+    first_target = clean_next_waste_cell()
+    assert env.grid[first_target] == RIVER  # the beam actually fired
+
+    # Still on cooldown for CleanupEnv.clean_cooldown_steps more steps:
+    # cleaning does nothing (the targeted waste cell stays waste).
+    for _ in range(CleanupEnv.clean_cooldown_steps):
+        target = next((r, c) for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
+        agent.row, agent.col, agent.orientation = target[0] + 1, target[1], NORTH
+        env.step({"agent-0": CLEAN})
+        assert env.grid[target] == WASTE  # unchanged -- beam didn't fire
+
+    # Cooldown has now elapsed -- the beam works again.
+    last_target = clean_next_waste_cell()
+    assert env.grid[last_target] == RIVER
+
+
+def test_no_new_waste_spawns_during_the_grace_period_but_does_after():
+    # Regression test for a gap caught by reading DeepMind's own reference
+    # implementation: new waste accumulation is paused for the first
+    # DIRT_GROWTH_START_TIME steps of each episode, not mentioned in the
+    # paper's own prose. Only new spawning is paused -- reset's own initial
+    # waste is untouched, so this test starts from a low, non-saturated
+    # waste density instead (density well under THRESHOLD_DEPLETION=0.4,
+    # matching the state new-waste-spawning is meant to test).
+    env = _make_env(num_agents=1)
+    for (r, c) in env.river_cells:
+        env.grid[r, c] = RIVER
+    env.grid[env.river_cells[0]] = WASTE
+    initial_waste_count = sum(1 for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
+    assert initial_waste_count == 1
+
+    # _t is 0-indexed and checked *before* this step's increment (see
+    # _spawn_waste's `self._t <= DIRT_GROWTH_START_TIME` guard), so _t takes
+    # values 0..DIRT_GROWTH_START_TIME (inclusive) -- DIRT_GROWTH_START_TIME+1
+    # calls -- before growth is allowed to resume.
+    for _ in range(DIRT_GROWTH_START_TIME + 1):
+        env.step({"agent-0": STAY})
+        waste_count = sum(1 for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
+        assert waste_count == initial_waste_count  # no growth yet during the grace period
+
+    # Grace period has now elapsed -- waste growth resumes. WASTE_SPAWN_PROBABILITY=0.5
+    # per candidate cell per step makes at least one new waste cell within a
+    # handful of steps overwhelmingly likely.
+    grew = False
+    for _ in range(20):
+        env.step({"agent-0": STAY})
+        waste_count = sum(1 for (r, c) in env.river_cells if env.grid[r, c] == WASTE)
+        if waste_count > initial_waste_count:
+            grew = True
+            break
+    assert grew
+
+
 def test_apple_spawn_probability_is_zero_above_depletion_threshold():
     env = _make_env(num_agents=1)
     env._compute_spawn_probabilities(env.grid)  # reset density (0.42) is already just past the threshold
@@ -57,7 +124,7 @@ def test_apple_spawn_probability_is_maximal_when_river_is_clean():
     for (r, c) in env.river_cells:
         env.grid[r, c] = RIVER
     env._compute_spawn_probabilities(env.grid)
-    assert env.current_apple_spawn_prob == pytest.approx(0.05)
+    assert env.current_apple_spawn_prob == pytest.approx(APPLE_RESPAWN_PROBABILITY)
 
 
 def test_apple_spawn_probability_interpolates_between_thresholds():
@@ -77,7 +144,7 @@ def test_apple_spawn_probability_interpolates_between_thresholds():
     waste_density = 1 - (half / len(env.river_cells))
     env._compute_spawn_probabilities(env.grid)
     if waste_density < 0.4:  # THRESHOLD_DEPLETION
-        expected = (1 - waste_density / 0.4) * 0.05
+        expected = (1 - waste_density / 0.4) * APPLE_RESPAWN_PROBABILITY
         assert env.current_apple_spawn_prob == pytest.approx(expected)
 
 
