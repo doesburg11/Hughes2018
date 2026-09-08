@@ -43,17 +43,20 @@ THRESHOLD_RESTORATION = 0.0
 WASTE_SPAWN_PROBABILITY = 0.5
 # The paper's own Sec. A.3 prose reads "apples spawn in the field with
 # probability 0.125x" (x = normalized saturation), which an earlier version
-# of this env took literally. But DeepMind's own maintained reference
-# implementation of this exact level
+# of this env took literally. But two independent reference implementations
+# of this exact environment both use 0.05 instead: DeepMind's own dmlab2d
 # (github.com/google-deepmind/lab2d/tree/main/dmlab2d/lib/game_scripts/levels/clean_up,
-# simulation.lua's `appleRespawnProbability` default) uses 0.05, and agrees
+# simulation.lua's `appleRespawnProbability`) and Eugene Vinitsky et al.'s
+# independent, paper-contemporaneous port
+# (github.com/eugenevinitsky/sequential_social_dilemma_games,
+# social_dilemmas/envs/cleanup.py's `appleRespawnProbability`) -- both agree
 # with the paper's text on every *other* checkable constant here
 # (thresholdDepletion=0.4, thresholdRestoration=0.0, mudSpawnProbability=0.5)
-# -- code is less error-prone than a hand-written sentence, so 0.05 is
-# better-evidenced than the paper's own prose on this one number. (Not to be
-# confused with Melting Pot's own `clean_up` substrate, a *different*,
-# later, 7-player, timeout-beam variant that only shares the name/citation
-# with this paper -- not used as evidence here.)
+# too. Two independent sources agreeing with each other over a hand-written
+# sentence is strong enough to treat the paper's own prose as the error
+# here. (Not to be confused with Melting Pot's own `clean_up` substrate, a
+# *different*, later, 7-player, timeout-beam variant that only shares the
+# name/citation with this paper -- not used as evidence anywhere in this repo.)
 APPLE_RESPAWN_PROBABILITY = 0.05
 
 # Hughes et al. (2018), Sec. 2.4: "At the start of each episode, the
@@ -67,18 +70,17 @@ APPLE_RESPAWN_PROBABILITY = 0.05
 # beyond", not a verified reproduction of a specific unstated number.
 RESET_WASTE_DENSITY = 0.42
 
-# DeepMind's reference implementation (see APPLE_RESPAWN_PROBABILITY's
-# comment for the source) delays new waste accumulation for the first 50
-# steps of each episode (`dirtGrowthStartTime`) -- not mentioned in the
-# paper's own prose, found only by reading the reference code. Only new
-# waste spawning is paused; the episode's initial waste (RESET_WASTE_DENSITY)
-# is unaffected.
-DIRT_GROWTH_START_TIME = 50
+# A post-reset waste-growth grace period (dmlab2d's `dirtGrowthStartTime`)
+# and beam cooldowns were both added here, then reverted -- see the
+# README's "What's matched vs. simplified" section for the full reasoning
+# (dmlab2d has them, but Vinitsky et al.'s independent, paper-contemporaneous
+# port has neither, and the paper's own prose is silent either way; unlike
+# APPLE_RESPAWN_PROBABILITY above, there was no second source to corroborate
+# dmlab2d here).
 
 
 class CleanupEnv(GridWorldEnv):
     num_actions = NUM_ACTIONS_CLEANUP
-    clean_cooldown_steps = 2  # DeepMind's reference implementation's `cleanWait`; see FIRE_COOLDOWN_STEPS's comment
 
     def __init__(self, num_agents: int = 5, config: GridWorldConfig | None = None, rng=None):
         self.river_cells: list[tuple[int, int]] = []
@@ -173,8 +175,6 @@ class CleanupEnv(GridWorldEnv):
                 ) * APPLE_RESPAWN_PROBABILITY
 
     def _spawn_waste(self, grid: np.ndarray) -> None:
-        if self._t <= DIRT_GROWTH_START_TIME:  # grace period; see DIRT_GROWTH_START_TIME
-            return
         if np.isclose(self.current_waste_spawn_prob, 0.0):
             return
         candidates = [(r, c) for (r, c) in self.river_cells if grid[r, c] != WASTE]

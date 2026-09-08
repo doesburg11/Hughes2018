@@ -6,10 +6,8 @@ import pytest
 from hughes2018.envs.grid_engine import (
     APPLE,
     BEAM_RANGE,
-    CLEAN,
     EMPTY,
     FIRE,
-    FIRE_COOLDOWN_STEPS,
     NORTH,
     EAST,
     SOUTH,
@@ -189,75 +187,6 @@ def test_fire_beam_costs_shooter_and_fines_target():
     pos_before = (target.row, target.col)
     env.step({"agent-0": STAY, "agent-1": STEP_FORWARD})
     assert (target.row, target.col) != pos_before
-
-
-def test_fire_beam_has_a_cooldown_before_it_can_be_used_again():
-    # Regression test for a gap caught by reading DeepMind's own reference
-    # implementation of this environment: agents could fire every single
-    # step, with no rate limit -- the reference implementation cools down
-    # for FIRE_COOLDOWN_STEPS steps after each use.
-    env = _DummyEnv(num_agents=2, config=GridWorldConfig(height=10, width=10, episode_length=200))
-    shooter, target = env.agents["agent-0"], env.agents["agent-1"]
-    shooter.row, shooter.col, shooter.orientation = 5, 5, NORTH
-    target.row, target.col = 3, 5  # directly ahead, within BEAM_RANGE=5
-
-    def refine_target():
-        target.row, target.col = 3, 5  # movement isn't under test; keep target in the beam's path
-        _obs, rewards, _dones, _infos = env.step({"agent-0": FIRE, "agent-1": STAY})
-        return rewards
-
-    first = refine_target()
-    assert first["agent-1"] == -50.0  # the beam actually fired
-
-    # Still on cooldown for the next FIRE_COOLDOWN_STEPS steps: firing again
-    # does nothing (no cost to the shooter, no fine to the target). The
-    # cooldown counter set to FIRE_COOLDOWN_STEPS after the first fire takes
-    # exactly that many decrementing calls to reach 0 (verified by directly
-    # simulating the decrement loop, not just eyeballing the off-by-one).
-    for _ in range(FIRE_COOLDOWN_STEPS):
-        rewards = refine_target()
-        assert rewards["agent-0"] == 0.0
-        assert rewards["agent-1"] == 0.0
-
-    # Cooldown has now elapsed -- the beam works again.
-    last = refine_target()
-    assert last["agent-0"] == -1.0
-    assert last["agent-1"] == -50.0
-
-
-class _ThirdActionEnv(_DummyEnv):
-    """Adds a hypothetical custom action beyond CLEAN, to exercise the
-    generic "other custom actions" fallthrough independently of CLEAN's own
-    cooldown -- see test_other_custom_action_fires_even_while_clean_is_on_cooldown."""
-
-    num_actions = 10
-    clean_cooldown_steps = 2
-    THIRD_ACTION = 9
-
-    def __init__(self, *args, **kwargs):
-        self.custom_action_calls = []
-        super().__init__(*args, **kwargs)
-
-    def _custom_action(self, agent, action):
-        self.custom_action_calls.append(action)
-        return 0.0
-
-
-def test_other_custom_action_fires_even_while_clean_is_on_cooldown():
-    # Regression test for a bug caught in review: the generic fallthrough
-    # for a hypothetical *third* custom action (beyond CLEAN) was chained
-    # onto the same if/elif block as clean_cooldown's gate, so it was
-    # silently skipped whenever an agent happened to be on CLEAN's own
-    # cooldown -- unrelated to that other action's own state. Dormant until
-    # a subclass defines a second custom action; this env does.
-    env = _ThirdActionEnv(num_agents=1, config=GridWorldConfig(height=10, width=10, episode_length=200))
-    agent = env.agents["agent-0"]
-
-    env.step({"agent-0": CLEAN})
-    assert agent.clean_cooldown > 0  # now on cooldown
-
-    env.step({"agent-0": _ThirdActionEnv.THIRD_ACTION})
-    assert _ThirdActionEnv.THIRD_ACTION in env.custom_action_calls
 
 
 if __name__ == "__main__":
