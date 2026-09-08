@@ -28,6 +28,7 @@ from hughes2018.agents.actor_critic import ActorCriticAgent, ActorCriticConfig
 from hughes2018.envs.cleanup import CleanupEnv
 from hughes2018.envs.grid_engine import GridWorldConfig
 from hughes2018.envs.harvest import HarvestEnv
+from hughes2018.reward.inequity_aversion import InequityAversionReward
 
 ENV_CLASSES = {"cleanup": CleanupEnv, "harvest": HarvestEnv}
 
@@ -43,7 +44,13 @@ def build_agents(env, checkpoint_dir, device):
             obs_channels=3,
             obs_height=obs_hw,
             obs_width=obs_hw,
-            config=ActorCriticConfig(num_actions=env.num_actions),
+            # trace_dim must match what the checkpoint was trained with --
+            # run_experiment1_cleanup.py/run_experiment2_harvest.py always
+            # use trace_dim=num_agents now (see their own comments), so a
+            # mismatched len(env.agents) here would fail to load with a
+            # clear shape-mismatch error from load_state_dict(), not a
+            # silent misread.
+            config=ActorCriticConfig(num_actions=env.num_actions, trace_dim=len(env.agents)),
             device=device,
         )
         checkpoint_path = Path(checkpoint_dir) / f"{agent_id}.pt"
@@ -56,16 +63,29 @@ def build_agents(env, checkpoint_dir, device):
 
 def rollout(env, agents, num_steps, rng):
     obs = env.reset()  # fresh episode; env.__init__ already ran reset() once, this discards that state on purpose
+    # A zero-alpha/beta InequityAversionReward used purely to track the
+    # observable trace vector these agents' networks expect as input --
+    # independent of whether the checkpoint was actually trained with a
+    # nonzero alpha/beta (trace_dim is an architecture property; every
+    # trace_dim>0 agent needs *a* trace vector fed in, whatever it is).
+    trace_tracker = None
     if agents is not None:
         for agent in agents.values():
             agent.reset_lstm_state()
+        agent_ids = list(agents.keys())
+        trace_tracker = InequityAversionReward(
+            agent_ids=agent_ids, alpha=dict.fromkeys(agent_ids, 0.0), beta=dict.fromkeys(agent_ids, 0.0)
+        )
     frames = [env.render()]
     for _ in range(num_steps):
         if agents is None:
             actions = {aid: int(rng.integers(env.num_actions)) for aid in env.agents}
         else:
-            actions = {aid: agents[aid].act(obs[aid])[0] for aid in agents}
-        obs, _rewards, dones, _infos = env.step(actions)
+            observable_trace = trace_tracker.observable_trace()
+            actions = {aid: agents[aid].act(obs[aid], observable_trace)[0] for aid in agents}
+        obs, rewards, dones, _infos = env.step(actions)
+        if trace_tracker is not None:
+            trace_tracker.apply(rewards)
         frames.append(env.render())
         if dones.get("__all__", False):
             break

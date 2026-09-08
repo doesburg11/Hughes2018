@@ -42,11 +42,11 @@ class _RecordingAgent:
     def reset_lstm_state(self):
         pass
 
-    def act(self, obs):
+    def act(self, obs, trace=None):
         self.seen_obs.append(int(obs[0]))
         return 0, 0.0, 0.0, None
 
-    def value_only(self, obs):
+    def value_only(self, obs, trace=None):
         return 0.0
 
     def update(self, rollout):

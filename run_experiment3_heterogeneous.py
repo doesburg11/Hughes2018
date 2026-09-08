@@ -20,6 +20,13 @@ group (needed so the comparison term is against the true group's traces,
 including the selfish agents) but this script only *uses* the adjusted
 reward for the agents flagged inequity-averse; selfish agents train on their
 raw, unadjusted reward.
+
+Unlike run_experiment1_cleanup.py/run_experiment2_harvest.py, this script
+doesn't opt into trace observability (`ActorCriticConfig.trace_dim`) --
+it has its own inline training loop rather than calling
+hughes2018/training/loop.py's train(), so it would need its own copy of
+that wiring. Left out of this repo's fix for that gap; a documented scope
+limit, not a hidden one -- see the README.
 """
 import argparse
 import json

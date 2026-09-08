@@ -92,7 +92,17 @@ def run_condition(name: str, inequity_mode: str, args) -> dict:
             obs_channels=3,
             obs_height=obs_hw,
             obs_width=obs_hw,
-            config=ActorCriticConfig(num_actions=env.num_actions, seed=args.seed + i, learning_rate=args.lr),
+            config=ActorCriticConfig(
+                num_actions=env.num_actions,
+                seed=args.seed + i,
+                learning_rate=args.lr,
+                # Sec. 3.2: agents observe every player's smoothed reward
+                # trace. Applied uniformly across all three conditions
+                # (including "baseline", which sees an always-zero trace
+                # vector) so the network architecture -- not just the
+                # reward -- stays identical across the comparison.
+                trace_dim=args.num_agents,
+            ),
             device=args.device,
         )
         for i in range(args.num_agents)

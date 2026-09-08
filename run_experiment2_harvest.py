@@ -34,7 +34,14 @@ def run_condition(name: str, use_inequity_reward: bool, args) -> dict:
             obs_channels=3,
             obs_height=obs_hw,
             obs_width=obs_hw,
-            config=ActorCriticConfig(num_actions=env.num_actions, seed=args.seed + i, learning_rate=args.lr),
+            config=ActorCriticConfig(
+                num_actions=env.num_actions,
+                seed=args.seed + i,
+                learning_rate=args.lr,
+                # See run_experiment1_cleanup.py's comment -- applied
+                # uniformly to both conditions here too.
+                trace_dim=args.num_agents,
+            ),
             device=args.device,
         )
         for i in range(args.num_agents)

@@ -90,6 +90,33 @@ def test_reset_clears_trace_state():
     assert r.trace == {"a": 0.0, "b": 0.0}
 
 
+def test_observable_trace_returns_zeros_before_any_apply_call():
+    r = InequityAversionReward(agent_ids=["a", "b"], alpha={"a": 1.0, "b": 1.0}, beta={"a": 1.0, "b": 1.0})
+    assert r.observable_trace() == [0.0, 0.0]
+
+
+def test_observable_trace_is_causally_one_step_behind_apply():
+    # Regression test for the causality rule central to trace observability
+    # (Sec. 3.2): a trace value read *before* apply() runs for a step is
+    # e^{t-1}, not e^t -- reading it *after* that same apply() call would
+    # leak the very outcome the paired action is about to produce.
+    r = InequityAversionReward(
+        agent_ids=["a", "b"], alpha={"a": 1.0, "b": 1.0}, beta={"a": 1.0, "b": 1.0}, gamma=1.0, trace_lambda=0.9
+    )
+    before_step_1 = r.observable_trace()  # e^{-1}, i.e. the reset state
+    assert before_step_1 == [0.0, 0.0]
+    r.apply({"a": 1.0, "b": 0.0})  # e_a -> 1.0, e_b -> 0.0
+    before_step_2 = r.observable_trace()  # e^0 -- valid for choosing the *next* action
+    assert before_step_2 == pytest.approx([1.0, 0.0])
+    assert before_step_2 != before_step_1  # sanity: it actually advanced
+
+
+def test_observable_trace_follows_agent_ids_order_not_insertion_order_of_apply():
+    r = InequityAversionReward(agent_ids=["z", "a"], alpha={"z": 1.0, "a": 1.0}, beta={"z": 1.0, "a": 1.0})
+    r.apply({"a": 5.0, "z": 1.0})  # dict passed to apply() in a different order than agent_ids
+    assert r.observable_trace() == pytest.approx([1.0, 5.0])  # still ["z", "a"] order
+
+
 def test_higher_alpha_pulls_disadvantaged_agent_reward_down_more():
     low = InequityAversionReward(agent_ids=["a", "b"], alpha={"a": 0.5, "b": 0.5}, beta={"a": 0.0, "b": 0.0})
     high = InequityAversionReward(agent_ids=["a", "b"], alpha={"a": 5.0, "b": 5.0}, beta={"a": 0.0, "b": 0.0})

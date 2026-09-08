@@ -92,6 +92,133 @@ def test_save_load_roundtrip_reproduces_policy(tmp_path):
         assert torch.equal(dict(agent.network.named_parameters())[name], p), f"{name} doesn't match saved agent"
 
 
+def _make_rollout(agent, num_steps=5, reward_on_last=1.0):
+    rollout = Rollout(initial_lstm_state=agent.network.initial_state(1, agent.device))
+    for t in range(num_steps):
+        obs = _random_obs()
+        action, _lp, _v, _s = agent.act(obs)
+        rollout.obs.append(obs)
+        rollout.actions.append(action)
+        rollout.rewards.append(reward_on_last if t == num_steps - 1 else 0.0)
+        rollout.dones.append(False)
+    return rollout
+
+
+def test_compute_then_apply_gradients_matches_update():
+    # update() is composed from compute_gradients() + apply_gradients(); this
+    # checks that composition actually produces the same result as calling
+    # update() directly, from the same starting weights and rollout -- the
+    # equivalence the parallel training path (which calls them separately,
+    # across process boundaries) depends on.
+    torch.manual_seed(0)
+    agent_a = _make_agent(seed=1, learning_rate=1e-2)
+    torch.manual_seed(0)
+    agent_b = _make_agent(seed=1, learning_rate=1e-2)
+    for name, p in agent_a.network.named_parameters():
+        assert torch.equal(p, dict(agent_b.network.named_parameters())[name])  # same starting weights
+
+    rollout_a = _make_rollout(agent_a)
+    rollout_b = Rollout(
+        initial_lstm_state=rollout_a.initial_lstm_state,
+        obs=list(rollout_a.obs),
+        actions=list(rollout_a.actions),
+        rewards=list(rollout_a.rewards),
+        dones=list(rollout_a.dones),
+        bootstrap_value=rollout_a.bootstrap_value,
+    )
+
+    stats_direct = agent_a.update(rollout_a)
+    grads, stats_split = agent_b.compute_gradients(rollout_b)
+    agent_b.apply_gradients(grads)
+
+    assert stats_direct == pytest.approx(stats_split)
+    for name, p_a in agent_a.network.named_parameters():
+        p_b = dict(agent_b.network.named_parameters())[name]
+        assert torch.allclose(p_a, p_b, atol=1e-6), f"{name} diverged between update() and compute+apply"
+
+
+def test_apply_gradients_averaged_across_two_grad_sets_differs_from_either_alone():
+    # Sanity check for the parallel training path's core operation: applying
+    # the average of two different gradient sets should move weights
+    # differently than applying either set alone.
+    agent = _make_agent(seed=0, learning_rate=1e-1)
+    rollout_1 = _make_rollout(agent, reward_on_last=1.0)
+    grads_1, _ = agent.compute_gradients(rollout_1)
+    agent.lstm_state = agent.network.initial_state(1, agent.device)  # don't let act() calls above bleed in
+    rollout_2 = _make_rollout(agent, reward_on_last=-1.0)
+    grads_2, _ = agent.compute_gradients(rollout_2)
+
+    averaged = {name: (grads_1[name] + grads_2[name]) / 2.0 for name in grads_1}
+    before = {name: p.clone() for name, p in agent.network.named_parameters()}
+    agent.apply_gradients(averaged)
+    after = dict(agent.network.named_parameters())
+
+    changed = any(not torch.equal(before[name], after[name]) for name in before)
+    assert changed
+    # The averaged update should differ from what either gradient set alone
+    # would have produced (they push in different directions given the
+    # opposite-sign rewards).
+    assert not all(torch.equal(after[name], before[name] - 1e-1 * grads_1[name]) for name in before)
+
+
+def test_trace_dim_zero_by_default_act_ignores_a_passed_trace():
+    # trace_dim defaults to 0 -- passing a trace anyway must be a silent
+    # no-op (the network never concatenates it in), not an error, so
+    # existing callers that don't know about this feature stay unaffected.
+    # Compares value_only()'s deterministic output rather than act()'s
+    # sampled action: two act() calls on identical logits can still sample
+    # different actions (torch's global RNG advances between calls), so
+    # only the value head -- unaffected by that sampling -- is a valid
+    # equality check here.
+    agent = _make_agent(seed=0)
+    value_without_trace = agent.value_only(_random_obs())
+    value_with_ignored_trace = agent.value_only(_random_obs(), trace=[1.0, 2.0, 3.0])
+    assert value_without_trace == pytest.approx(value_with_ignored_trace)
+
+
+def test_trace_dim_positive_requires_a_trace_argument():
+    agent = _make_agent(trace_dim=3)
+    with pytest.raises(ValueError):
+        agent.act(_random_obs())  # no trace passed, but trace_dim=3
+
+
+def test_trace_dim_positive_accepts_a_trace_and_changes_output():
+    # A different trace vector for the same obs/LSTM-state should reach the
+    # network (via the concatenated fc1 input) and change its output --
+    # otherwise the trace input would be silently disconnected.
+    agent = _make_agent(seed=0, trace_dim=3)
+    obs = _random_obs()
+    _action, _log_prob, value_zero, _ = agent.act(obs, trace=[0.0, 0.0, 0.0])
+    agent.reset_lstm_state()
+    _action, _log_prob, value_nonzero, _ = agent.act(obs, trace=[10.0, -5.0, 3.0])
+    assert value_zero != pytest.approx(value_nonzero)
+
+
+def test_update_with_trace_dim_changes_every_named_parameter_including_fc1():
+    # Same rigor as test_update_runs_and_changes_every_named_parameter, but
+    # with trace_dim>0: fc1's input width now includes the trace slice, and
+    # this checks that slice's weights actually receive gradient too, not
+    # just the image-derived slice.
+    torch.manual_seed(0)
+    agent = _make_agent(learning_rate=1e-2, trace_dim=3)
+    rollout = Rollout(initial_lstm_state=agent.network.initial_state(1, agent.device))
+    rng = np.random.default_rng(1)
+    for t in range(5):
+        obs = _random_obs()
+        trace = list(rng.uniform(-1, 1, size=3))
+        action, _log_prob, _value, _state_before = agent.act(obs, trace)
+        rollout.obs.append(obs)
+        rollout.actions.append(action)
+        rollout.rewards.append(1.0 if t == 4 else 0.0)
+        rollout.dones.append(False)
+        rollout.traces.append(trace)
+
+    before = {name: p.clone() for name, p in agent.network.named_parameters()}
+    agent.update(rollout)
+    unchanged = [name for name, p in agent.network.named_parameters() if torch.equal(before[name], p)]
+    assert not unchanged, f"parameters that did not update: {unchanged}"
+
+
 def test_update_return_matches_hand_computed_discounted_sum():
     agent = _make_agent(discount=0.9)
     rollout = Rollout(initial_lstm_state=agent.network.initial_state(1, agent.device))

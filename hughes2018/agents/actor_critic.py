@@ -38,6 +38,7 @@ class Rollout:
     actions: list = field(default_factory=list)
     rewards: list = field(default_factory=list)
     dones: list = field(default_factory=list)
+    traces: list = field(default_factory=list)  # per-step observable inequity-trace vectors; see ActorCriticConfig.trace_dim
     initial_lstm_state: tuple = None
     bootstrap_value: float = 0.0
 
@@ -48,6 +49,13 @@ class ActorCriticConfig:
     conv_channels: int = 32
     fc_hidden: int = 64
     lstm_hidden: int = 128
+    # Sec. 3.2: "we allow agents to observe the smoothed reward of every
+    # player on each timestep." 0 (default) keeps the network's input
+    # exactly as before -- opt in by passing the population size, e.g.
+    # trace_dim=num_agents, so every agent's trace (including its own) is
+    # observable. See InequityAversionReward.observable_trace() for the
+    # causality rule this depends on the caller following.
+    trace_dim: int = 0
     discount: float = 0.99  # matches this paper's own stated default (also used by McKee et al. 2023)
     learning_rate: float = 1e-4  # unspecified by the paper; own choice, see README
     entropy_coeff: float = 0.01  # unspecified by the paper; own choice, see README
@@ -69,7 +77,7 @@ class ActorCriticNetwork(nn.Module):
         # the replacement, so that layer never actually trained. Caught in
         # review, fixed by removing the lazy pattern entirely.)
         self.conv = nn.Conv2d(obs_channels, cfg.conv_channels, kernel_size=3, stride=1, padding=1)
-        flat_dim = cfg.conv_channels * obs_height * obs_width
+        flat_dim = cfg.conv_channels * obs_height * obs_width + cfg.trace_dim
         self.fc1 = nn.Linear(flat_dim, cfg.fc_hidden)
         self.fc2 = nn.Linear(cfg.fc_hidden, cfg.fc_hidden)
         self.lstm = nn.LSTMCell(cfg.fc_hidden, cfg.lstm_hidden)
@@ -81,10 +89,20 @@ class ActorCriticNetwork(nn.Module):
         c = torch.zeros(batch_size, self.cfg.lstm_hidden, device=device)
         return h, c
 
-    def forward(self, obs: torch.Tensor, lstm_state: tuple[torch.Tensor, torch.Tensor]):
-        """obs: (B, C, H, W) float32 in [0, 1]. Returns (policy_logits, value, new_lstm_state)."""
+    def forward(
+        self,
+        obs: torch.Tensor,
+        lstm_state: tuple[torch.Tensor, torch.Tensor],
+        trace: torch.Tensor | None = None,
+    ):
+        """obs: (B, C, H, W) float32 in [0, 1]. trace: (B, trace_dim) float32,
+        required iff cfg.trace_dim > 0. Returns (policy_logits, value, new_lstm_state)."""
         x = F.relu(self.conv(obs))
         x = x.flatten(start_dim=1)
+        if self.cfg.trace_dim > 0:
+            if trace is None:
+                raise ValueError(f"network configured with trace_dim={self.cfg.trace_dim} but forward() got trace=None")
+            x = torch.cat([x, trace], dim=1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         h, c = self.lstm(x, lstm_state)
@@ -123,8 +141,17 @@ class ActorCriticAgent:
     def reset_lstm_state(self) -> None:
         self.lstm_state = self.network.initial_state(1, self.device)
 
-    def act(self, obs) -> tuple[int, float, float, tuple[torch.Tensor, torch.Tensor]]:
+    def _trace_tensor(self, trace: list[float] | None) -> torch.Tensor | None:
+        return torch.as_tensor([trace], dtype=torch.float32, device=self.device) if trace is not None else None
+
+    def act(
+        self, obs, trace: list[float] | None = None
+    ) -> tuple[int, float, float, tuple[torch.Tensor, torch.Tensor]]:
         """Sample an action; returns (action, log_prob, value, lstm_state_before_this_step).
+
+        `trace`: this step's observable inequity-trace vector (required iff
+        this agent's `cfg.trace_dim > 0` -- see
+        InequityAversionReward.observable_trace()).
 
         The caller is expected to store `lstm_state_before_this_step` alongside
         the transition (needed to recompute the same forward pass with
@@ -134,23 +161,26 @@ class ActorCriticAgent:
         state_before = self.lstm_state
         x = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
         with torch.no_grad():
-            logits, value, new_state = self.network(x, state_before)
+            logits, value, new_state = self.network(x, state_before, self._trace_tensor(trace))
             dist = torch.distributions.Categorical(logits=logits)
             action = dist.sample()
             log_prob = dist.log_prob(action)
         self.lstm_state = (new_state[0].detach(), new_state[1].detach())
         return int(action.item()), float(log_prob.item()), float(value.item()), state_before
 
-    def value_only(self, obs) -> float:
+    def value_only(self, obs, trace: list[float] | None = None) -> float:
         """Estimate the value of the current LSTM state (for a rollout's
         bootstrap target) WITHOUT advancing `self.lstm_state` or sampling/
         consuming an action -- this observation is being used only to
         evaluate a target, not as a real step the agent took, so it must not
         perturb the persistent recurrent state the next rollout continues
-        from."""
+        from.
+
+        `trace`: the observable inequity-trace vector for the state being
+        evaluated (required iff `cfg.trace_dim > 0`)."""
         x = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
         with torch.no_grad():
-            _logits, value, _new_state = self.network(x, self.lstm_state)
+            _logits, value, _new_state = self.network(x, self.lstm_state, self._trace_tensor(trace))
         return float(value.item())
 
     def update(self, rollout: Rollout) -> dict[str, float]:
@@ -159,6 +189,30 @@ class ActorCriticAgent:
         `rollout` holds this agent's own (obs, action, reward, done,
         lstm_state_before) for every step of the collection window, plus a
         bootstrap value for the state after the last step.
+
+        Equivalent to `compute_gradients(rollout)` followed by
+        `apply_gradients(...)` on the same agent -- kept as a single call for
+        this repo's single-process training path. The two-step split exists
+        so gradients can, in principle, be computed and averaged across
+        several rollouts before any optimizer step is applied (an earlier
+        multiprocessing-based parallel training path used this directly;
+        that path was abandoned in favor of the optional Ray RLlib backend
+        -- see run_rllib_train.py -- but the split itself stayed, since
+        `test_compute_then_apply_gradients_matches_update` already covers
+        it and it costs nothing to keep).
+        """
+        grads, stats = self.compute_gradients(rollout)
+        self.apply_gradients(grads)
+        return stats
+
+    def compute_gradients(self, rollout: Rollout) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
+        """Forward + backward pass only -- does NOT call optimizer.step().
+
+        Returns (per-parameter gradients keyed by name, the same stats dict
+        `update()` returns). `self.network`'s own `.grad` fields are left
+        populated as a side effect (standard autograd behavior) but are not
+        applied to the weights; call `apply_gradients()` (on this agent or a
+        different one, e.g. a master process's copy) to actually step.
         """
         cfg = self.cfg
         device = self.device
@@ -179,7 +233,8 @@ class ActorCriticAgent:
         log_probs, values, entropies = [], [], []
         for t in range(T):
             x = torch.as_tensor(rollout.obs[t], dtype=torch.float32, device=device).unsqueeze(0) / 255.0
-            logits, value, state = self.network(x, state)
+            trace_t = self._trace_tensor(rollout.traces[t]) if rollout.traces else None
+            logits, value, state = self.network(x, state, trace_t)
             dist = torch.distributions.Categorical(logits=logits)
             action_t = torch.as_tensor([rollout.actions[t]], device=device)
             log_probs.append(dist.log_prob(action_t).squeeze(0))
@@ -199,13 +254,27 @@ class ActorCriticAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), cfg.grad_clip_norm)
-        self.optimizer.step()
+        # No clipping here -- these are the raw, unclipped gradients.
+        # apply_gradients() clips once, after this (or, in the parallel
+        # training path, after averaging several workers' gradients
+        # together). Clipping each worker's raw gradient here AND the
+        # averaged gradient in apply_gradients() would double-clip,
+        # distorting the effective clip threshold.
+        grads = {name: p.grad.detach().clone() for name, p in self.network.named_parameters()}
 
-        return {
+        stats = {
             "loss": float(loss.item()),
             "policy_loss": float(policy_loss.item()),
             "value_loss": float(value_loss.item()),
             "entropy": float(entropy_t.item()),
             "mean_return": float(returns_t.mean().item()),
         }
+        return grads, stats
+
+    def apply_gradients(self, grads: dict[str, torch.Tensor]) -> None:
+        """Set `.grad` from `grads` (by parameter name) and take one optimizer step."""
+        self.optimizer.zero_grad()
+        for name, p in self.network.named_parameters():
+            p.grad = grads[name].to(self.device)
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.cfg.grad_clip_norm)
+        self.optimizer.step()

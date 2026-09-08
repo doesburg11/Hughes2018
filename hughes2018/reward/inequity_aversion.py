@@ -100,6 +100,32 @@ class InequityAversionReward:
     def reset(self) -> None:
         self.trace = {agent_id: 0.0 for agent_id in self.agent_ids}
 
+    def observable_trace(self) -> list[float]:
+        """Every agent's trace as it currently stands, in a fixed order
+        (`self.agent_ids`).
+
+        Causality note for callers: Eq. 4's `e_i^t` is computed *from*
+        `r_i^t`, the reward an action produces -- so a trace value is only
+        valid to feed into the observation for choosing an action that
+        comes *strictly after* the step that produced it, never the step
+        that produced it itself. Concretely, this is safe to call either
+        (a) right where an observation is captured for action selection,
+        *before* that step's `apply()` runs -- giving `e^{t-1}`, matching
+        `hughes2018/training/loop.py`'s usage -- or (b) right *after* a
+        step's `apply()`, to attach the freshly-updated `e^t` to the
+        *next* observation returned to the caller -- matching
+        `GridWorldRLlibEnv.step()`'s usage, where the returned observation
+        is what a *later* action gets chosen from, not this step's own
+        action (already fixed by the time `step()` runs). Both give the
+        same result: the trace pairs with an action one step later than
+        the reward that produced it. Getting this backwards -- reading a
+        trace value that already reflects the very outcome the paired
+        action is about to produce -- would leak next-step information
+        into the decision without erroring; it would just make training
+        look artificially good.
+        """
+        return [self.trace[agent_id] for agent_id in self.agent_ids]
+
     def apply(self, raw_rewards: dict[str, float]) -> dict[str, float]:
         """Update each agent's reward trace and return inequity-adjusted rewards."""
         n = len(self.agent_ids)
