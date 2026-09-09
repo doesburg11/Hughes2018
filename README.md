@@ -2,6 +2,8 @@
 
 > **This is a from-scratch paper reproduction, not a ported codebase.** This repo rebuilds Hughes et al. (2018)'s Cleanup and Harvest environments and its inequity-aversion reward mechanism directly from the paper, with its own independent actor-critic training and no dependency on Vinitsky et al.'s code. For an engineering port of Vinitsky's existing `sequential_social_dilemma_games` codebase to Ray RLlib's new API stack instead — which already includes a simpler, instantaneous-reward version of this same mechanism as an opt-in flag (`inequity_averse_reward`) — see the sibling repo **[SequentialSocialDilemmas](https://github.com/doesburg11/SequentialSocialDilemmas)**. For the from-scratch reproduction of the *earlier* DeepMind SSD paper (Leibo et al. 2017, Gathering and Wolfpack, no Cleanup/Harvest at all), see **[Leibo2017](https://github.com/doesburg11/Leibo2017)**. Three repos with overlapping lineage and easy-to-confuse names — this note, and matching notes in the other two, are here so none of them gets mistaken for another.
 
+> **This repo does not currently reproduce the paper's headline Cleanup claim.** `advantageous_only` (guilt) does not beat `baseline` on collective return at the scale tested here, the opposite of the paper's Fig. 3A — see ["Known gaps from the paper"](#known-gaps-from-the-paper) below for the full result and what's been ruled out.
+
 A from-scratch replication of:
 
 > Hughes, E., Leibo, J. Z., Phillips, M., Tuyls, K., Dueñez-Guzmán, E., Castañeda, A. G., Dunning, I., Zhu, T., McKee, K. R., Koster, R., Roff, H., & Graepel, T. (2018). *Inequity Aversion Improves Cooperation in Intertemporal Social Dilemmas.* NeurIPS 2018. https://arxiv.org/abs/1803.08884
